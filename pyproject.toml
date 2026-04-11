@@ -1,0 +1,23 @@
+[project]
+name = "ComfyUI_Qwen3-TTS"
+description = "ComfyUI custom nodes for Qwen3-TTS: voice cloning, voice design, custom voice with instruct, and fine-tuning pipeline (including instruct-aware CustomVoice fine-tuning)."
+version = "1.0.0"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "qwen-tts",
+    "soundfile",
+    "numpy",
+    "torch",
+    "transformers",
+    "accelerate",
+    "librosa",
+    "safetensors",
+]
+
+[project.urls]
+Repository = "https://github.com/Hosung-Ahn/ComfyUI_Qwen3-TTS"
+
+[tool.comfy]
+PublisherId = "hosung"
+DisplayName = "ComfyUI Qwen3-TTS (Extended)"

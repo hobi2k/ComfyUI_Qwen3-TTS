@@ -1,0 +1,8 @@
+qwen-tts
+soundfile
+numpy
+torch
+transformers
+accelerate
+librosa
+safetensors

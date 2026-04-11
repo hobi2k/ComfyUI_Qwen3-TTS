@@ -1,0 +1,42 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Model checkpoints and datasets (large binary files)
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.jsonl
+*.npz
+
+# Audio outputs
+*.wav
+*.mp3
+*.flac
+
+# Logs
+*.log
+logs/
+runs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
