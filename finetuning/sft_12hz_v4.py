@@ -116,6 +116,20 @@ def train(
     target_speaker_embedding = None
     final_ckpt = output_model_path
 
+    # Resolve init_model_path to a local directory for checkpoint copying.
+    # If it's a HuggingFace repo ID (not an existing local dir), download/resolve snapshot.
+    if os.path.isdir(init_model_path):
+        local_init_path = init_model_path
+    else:
+        try:
+            from huggingface_hub import snapshot_download
+            local_init_path = snapshot_download(init_model_path, local_files_only=True)
+            accelerator.print(f"Resolved init model path: {local_init_path}")
+        except Exception as e:
+            accelerator.print(f"Warning: could not resolve local snapshot ({e}). "
+                              "Checkpoint copy may fail.")
+            local_init_path = init_model_path
+
     for epoch in range(num_epochs):
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(model):
@@ -227,7 +241,7 @@ def train(
         # ── Save checkpoint ──────────────────────────────────────────────────
         if accelerator.is_main_process:
             epoch_dir = os.path.join(output_model_path, f"epoch_{epoch + 1}")
-            shutil.copytree(init_model_path, epoch_dir, dirs_exist_ok=True)
+            shutil.copytree(local_init_path, epoch_dir, dirs_exist_ok=True)
 
             # Update config: mark as custom_voice, register speaker
             cfg_path = os.path.join(epoch_dir, "config.json")
