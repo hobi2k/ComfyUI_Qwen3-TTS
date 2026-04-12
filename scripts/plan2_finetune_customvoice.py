@@ -177,30 +177,60 @@ def main():
         if args.pause_durations else []
     )
 
-    # Patch: skip speech_tokenizer loading (weights missing in CustomVoice snapshot;
-    # CustomVoice synthesis uses speaker embedding index, not audio encoding)
+    # Patch: fix speech_tokenizer loading (HF cache snapshot lacks weights;
+    # fall back to ComfyUI models folder or standalone tokenizer repo)
     try:
+        import os as _os
         from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
         from transformers import PreTrainedModel
 
         if not getattr(Qwen3TTSForConditionalGeneration, "_speech_tok_patched", False):
+            # Pre-build candidate list
+            _script_dir = Path(__file__).parent
+            _comfyui_root = _script_dir.parent.parent.parent  # custom_nodes/.. = Data/Packages/ComfyUI
+            _qwen_models = _comfyui_root / "models" / "Qwen3-TTS"
+            _st_candidates: list[str] = []
+            standalone = _qwen_models / "Qwen3-TTS-Tokenizer-12Hz"
+            if (standalone / "model.safetensors").exists():
+                _st_candidates.append(str(standalone))
+            if _qwen_models.is_dir():
+                for _d in _qwen_models.iterdir():
+                    st = _d / "speech_tokenizer"
+                    if (st / "model.safetensors").exists():
+                        _st_candidates.append(str(st))
+
             @classmethod
-            def _no_speech_tok(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+            def _smart_from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+                import json as _json
                 model = PreTrainedModel.from_pretrained.__func__(
                     cls, pretrained_model_name_or_path, *model_args, **kwargs
                 )
+                cands = list(_st_candidates)
+                own_st = Path(str(pretrained_model_name_or_path)) / "speech_tokenizer"
+                if (own_st / "model.safetensors").exists():
+                    cands.insert(0, str(own_st))
+                loaded = False
+                for st_dir in cands:
+                    try:
+                        from qwen_tts.inference.qwen3_tts_tokenizer import Qwen3TTSTokenizer
+                        model.load_speech_tokenizer(Qwen3TTSTokenizer.from_pretrained(st_dir))
+                        loaded = True
+                        break
+                    except Exception:
+                        pass
+                if not loaded:
+                    log("[plan2] WARNING: speech_tokenizer not loaded")
                 try:
                     from transformers.utils import cached_file
-                    gcfg_path = cached_file(pretrained_model_name_or_path, "generation_config.json")
-                    if gcfg_path:
-                        import json as _json
-                        with open(gcfg_path, "r", encoding="utf-8") as f:
+                    gcfg = cached_file(pretrained_model_name_or_path, "generation_config.json")
+                    if gcfg:
+                        with open(gcfg, "r", encoding="utf-8") as f:
                             model.load_generate_config(_json.load(f))
                 except Exception:
                     pass
                 return model
 
-            Qwen3TTSForConditionalGeneration.from_pretrained = _no_speech_tok
+            Qwen3TTSForConditionalGeneration.from_pretrained = _smart_from_pretrained
             Qwen3TTSForConditionalGeneration._speech_tok_patched = True
     except Exception as e:
         log(f"[plan2] speech_tokenizer patch skipped: {e}")

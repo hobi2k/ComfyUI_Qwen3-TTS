@@ -29,12 +29,18 @@ if _HERE not in sys.path:
 from dataset import TTSDataset  # updated dataset with instruct support
 
 
-def _patch_skip_speech_tokenizer():
+def _patch_speech_tokenizer_fallback():
     """
-    Monkey-patch Qwen3TTSForConditionalGeneration.from_pretrained to skip
-    loading the speech tokenizer (its weights are often missing from the
-    CustomVoice model snapshot; and fine-tuning/CustomVoice synthesis
-    doesn't need it).
+    Monkey-patch Qwen3TTSForConditionalGeneration.from_pretrained to handle
+    missing speech_tokenizer weights in the HF cache snapshot.
+
+    The HF snapshot for CustomVoice often ships without speech_tokenizer
+    model weights (only the config). This patch:
+      1. Calls PreTrainedModel.from_pretrained to load the main model weights.
+      2. Tries to load the speech tokenizer from multiple candidate directories
+         (the model's own speech_tokenizer/ subdir, then the ComfyUI models
+         folder, then the standalone Qwen3-TTS-Tokenizer-12Hz repo).
+      3. Loads generate_config if available.
     """
     try:
         from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
@@ -44,24 +50,80 @@ def _patch_skip_speech_tokenizer():
             return  # already patched
 
         @classmethod
-        def _no_speech_tok(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-            """Load model weights only — skip speech_tokenizer."""
+        def _smart_from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+            """Load main model then find speech_tokenizer from best available location."""
+            import json as _json
+
             model = PreTrainedModel.from_pretrained.__func__(
                 cls, pretrained_model_name_or_path, *model_args, **kwargs
             )
-            # Load generate_config best-effort (non-critical if absent)
+
+            # ── Find speech_tokenizer with actual weights ──────────────────
+            candidates = []
+
+            # 1. Standard subdir of the model path
+            if os.path.isdir(pretrained_model_name_or_path):
+                st = os.path.join(pretrained_model_name_or_path, "speech_tokenizer")
+                if os.path.isfile(os.path.join(st, "model.safetensors")):
+                    candidates.append(st)
+
+            # 2. HF cache snapshot subdir
+            try:
+                from transformers.utils import cached_file
+                st_cfg = cached_file(pretrained_model_name_or_path, "speech_tokenizer/config.json")
+                if st_cfg:
+                    st_dir = os.path.dirname(st_cfg)
+                    if os.path.isfile(os.path.join(st_dir, "model.safetensors")):
+                        candidates.append(st_dir)
+            except Exception:
+                pass
+
+            # 3. ComfyUI models folder: scan for any model with speech_tokenizer weights
+            _comfyui_qwen = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..", "..", "..", "..", "models", "Qwen3-TTS"
+            )
+            _comfyui_qwen = os.path.normpath(_comfyui_qwen)
+            if os.path.isdir(_comfyui_qwen):
+                # Prefer the standalone tokenizer repo first
+                standalone = os.path.join(_comfyui_qwen, "Qwen3-TTS-Tokenizer-12Hz")
+                if os.path.isfile(os.path.join(standalone, "model.safetensors")):
+                    candidates.append(standalone)
+                # Also scan model subdirs for speech_tokenizer/
+                for d in os.listdir(_comfyui_qwen):
+                    st = os.path.join(_comfyui_qwen, d, "speech_tokenizer")
+                    if os.path.isfile(os.path.join(st, "model.safetensors")):
+                        candidates.append(st)
+
+            # Try each candidate
+            speech_tokenizer_loaded = False
+            for st_dir in candidates:
+                try:
+                    from qwen_tts.inference.qwen3_tts_tokenizer import Qwen3TTSTokenizer
+                    speech_tokenizer = Qwen3TTSTokenizer.from_pretrained(st_dir)
+                    model.load_speech_tokenizer(speech_tokenizer)
+                    speech_tokenizer_loaded = True
+                    print(f"[sft_12hz_v4] speech_tokenizer loaded from: {st_dir}", flush=True)
+                    break
+                except Exception as e:
+                    print(f"[sft_12hz_v4] speech_tokenizer candidate {st_dir} failed: {e}", flush=True)
+
+            if not speech_tokenizer_loaded:
+                print("[sft_12hz_v4] WARNING: speech_tokenizer not loaded — synthesis will fail", flush=True)
+
+            # ── Load generate_config ───────────────────────────────────────
             try:
                 from transformers.utils import cached_file
                 gcfg_path = cached_file(pretrained_model_name_or_path, "generation_config.json")
                 if gcfg_path:
-                    import json as _json
                     with open(gcfg_path, "r", encoding="utf-8") as f:
                         model.load_generate_config(_json.load(f))
             except Exception:
                 pass
+
             return model
 
-        Qwen3TTSForConditionalGeneration.from_pretrained = _no_speech_tok
+        Qwen3TTSForConditionalGeneration.from_pretrained = _smart_from_pretrained
         Qwen3TTSForConditionalGeneration._speech_tok_patched = True
     except Exception as e:
         print(f"[sft_12hz_v4] speech_tokenizer patch skipped: {e}", flush=True)
@@ -85,7 +147,7 @@ def train(
     Fine-tune Qwen3-TTS with instruct support.
     Returns path to the final epoch checkpoint directory.
     """
-    _patch_skip_speech_tokenizer()
+    _patch_speech_tokenizer_fallback()
     from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
 
     torch.manual_seed(seed)
