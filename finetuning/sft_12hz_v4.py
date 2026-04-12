@@ -132,11 +132,24 @@ def train(
                 instruct_mask_batch = batch.get('instruct_mask')  # [B, T_inst] or None
 
                 # Speaker embedding
-                speaker_embedding = model.speaker_encoder(
-                    ref_mels.to(model.device).to(model.dtype)
-                ).detach()
-                if target_speaker_embedding is None:
-                    target_speaker_embedding = speaker_embedding
+                if model.speaker_encoder is not None:
+                    # Base model: extract speaker embedding from reference mel
+                    speaker_embedding = model.speaker_encoder(
+                        ref_mels.to(model.device).to(model.dtype)
+                    ).detach()
+                    if target_speaker_embedding is None:
+                        target_speaker_embedding = speaker_embedding
+                else:
+                    # CustomVoice model has no speaker_encoder.
+                    # Initialize new speaker from "sohee" (index 2864, Korean female)
+                    # and reuse it every step.
+                    if target_speaker_embedding is None:
+                        INIT_IDX = 2864  # sohee
+                        target_speaker_embedding = (
+                            model.talker.model.codec_embedding.weight[INIT_IDX]
+                            .detach().clone().unsqueeze(0)
+                        )
+                    speaker_embedding = target_speaker_embedding
 
                 input_text_ids  = input_ids[:, :, 0]
                 input_codec_ids = input_ids[:, :, 1]
