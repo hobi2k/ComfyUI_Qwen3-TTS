@@ -177,6 +177,34 @@ def main():
         if args.pause_durations else []
     )
 
+    # Patch: skip speech_tokenizer loading (weights missing in CustomVoice snapshot;
+    # CustomVoice synthesis uses speaker embedding index, not audio encoding)
+    try:
+        from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
+        from transformers import PreTrainedModel
+
+        if not getattr(Qwen3TTSForConditionalGeneration, "_speech_tok_patched", False):
+            @classmethod
+            def _no_speech_tok(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+                model = PreTrainedModel.from_pretrained.__func__(
+                    cls, pretrained_model_name_or_path, *model_args, **kwargs
+                )
+                try:
+                    from transformers.utils import cached_file
+                    gcfg_path = cached_file(pretrained_model_name_or_path, "generation_config.json")
+                    if gcfg_path:
+                        import json as _json
+                        with open(gcfg_path, "r", encoding="utf-8") as f:
+                            model.load_generate_config(_json.load(f))
+                except Exception:
+                    pass
+                return model
+
+            Qwen3TTSForConditionalGeneration.from_pretrained = _no_speech_tok
+            Qwen3TTSForConditionalGeneration._speech_tok_patched = True
+    except Exception as e:
+        log(f"[plan2] speech_tokenizer patch skipped: {e}")
+
     from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
 
     # ── STEP 1: Dataset ────────────────────────────────────────────────────

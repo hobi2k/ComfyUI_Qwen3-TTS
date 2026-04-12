@@ -29,6 +29,44 @@ if _HERE not in sys.path:
 from dataset import TTSDataset  # updated dataset with instruct support
 
 
+def _patch_skip_speech_tokenizer():
+    """
+    Monkey-patch Qwen3TTSForConditionalGeneration.from_pretrained to skip
+    loading the speech tokenizer (its weights are often missing from the
+    CustomVoice model snapshot; and fine-tuning/CustomVoice synthesis
+    doesn't need it).
+    """
+    try:
+        from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
+        from transformers import PreTrainedModel
+
+        if getattr(Qwen3TTSForConditionalGeneration, "_speech_tok_patched", False):
+            return  # already patched
+
+        @classmethod
+        def _no_speech_tok(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+            """Load model weights only — skip speech_tokenizer."""
+            model = PreTrainedModel.from_pretrained.__func__(
+                cls, pretrained_model_name_or_path, *model_args, **kwargs
+            )
+            # Load generate_config best-effort (non-critical if absent)
+            try:
+                from transformers.utils import cached_file
+                gcfg_path = cached_file(pretrained_model_name_or_path, "generation_config.json")
+                if gcfg_path:
+                    import json as _json
+                    with open(gcfg_path, "r", encoding="utf-8") as f:
+                        model.load_generate_config(_json.load(f))
+            except Exception:
+                pass
+            return model
+
+        Qwen3TTSForConditionalGeneration.from_pretrained = _no_speech_tok
+        Qwen3TTSForConditionalGeneration._speech_tok_patched = True
+    except Exception as e:
+        print(f"[sft_12hz_v4] speech_tokenizer patch skipped: {e}", flush=True)
+
+
 def train(
     init_model_path: str,
     output_model_path: str,
@@ -47,6 +85,7 @@ def train(
     Fine-tune Qwen3-TTS with instruct support.
     Returns path to the final epoch checkpoint directory.
     """
+    _patch_skip_speech_tokenizer()
     from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
 
     torch.manual_seed(seed)
