@@ -1,0 +1,167 @@
+{
+  "1": {
+    "_meta": {
+      "title": "VoiceDesign Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Base Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "CustomVoice Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Voice Design"
+    },
+    "class_type": "Qwen3VoiceDesign",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "text": "안녕하세요. 이 목소리 특성을 비교해볼게요.",
+      "instruct": "A clear Korean female voice with soft warmth, stable pace, and subtle breathiness.",
+      "language": "Korean",
+      "seed": 42
+    }
+  },
+  "5": {
+    "_meta": {
+      "title": "Prompt Full Clone"
+    },
+    "class_type": "Qwen3ClonePromptFromAudio",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "ref_audio": [
+        "4",
+        0
+      ],
+      "ref_text": "안녕하세요. 이 목소리 특성을 비교해볼게요.",
+      "ref_audio_max_seconds": 30.0,
+      "x_vector_only_mode": false
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Prompt XVector Only"
+    },
+    "class_type": "Qwen3ClonePromptFromAudio",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "ref_audio": [
+        "4",
+        0
+      ],
+      "ref_text": "안녕하세요. 이 목소리 특성을 비교해볼게요.",
+      "ref_audio_max_seconds": 30.0,
+      "x_vector_only_mode": true
+    }
+  },
+  "7": {
+    "_meta": {
+      "title": "Generate Full Clone"
+    },
+    "class_type": "Qwen3CustomVoiceFromPrompt",
+    "inputs": {
+      "model": [
+        "3",
+        0
+      ],
+      "prompt": [
+        "5",
+        0
+      ],
+      "text": "첫 번째는 전체 clone prompt를 사용한 결과예요.",
+      "seed": 42,
+      "language": "Korean",
+      "instruct": "Keep the designed voice stable, warm, and natural.",
+      "max_new_tokens": 2048,
+      "temperature": 0.9,
+      "top_p": 0.9
+    }
+  },
+  "8": {
+    "_meta": {
+      "title": "Generate XVector Only"
+    },
+    "class_type": "Qwen3CustomVoiceFromPrompt",
+    "inputs": {
+      "model": [
+        "3",
+        0
+      ],
+      "prompt": [
+        "6",
+        0
+      ],
+      "text": "두 번째는 x vector only mode를 사용한 결과예요.",
+      "seed": 42,
+      "language": "Korean",
+      "instruct": "Keep the designed voice stable, warm, and natural.",
+      "max_new_tokens": 2048,
+      "temperature": 0.9,
+      "top_p": 0.9
+    }
+  },
+  "9": {
+    "_meta": {
+      "title": "Save Full Clone Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "7",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/compare_full_clone"
+    }
+  },
+  "10": {
+    "_meta": {
+      "title": "Save XVector Only Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "8",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/compare_xvector_only"
+    }
+  }
+}

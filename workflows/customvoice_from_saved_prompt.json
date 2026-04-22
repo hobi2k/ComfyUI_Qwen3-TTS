@@ -1,0 +1,60 @@
+{
+  "1": {
+    "_meta": {
+      "title": "CustomVoice Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Load Saved Prompt"
+    },
+    "class_type": "Qwen3LoadPrompt",
+    "inputs": {
+      "prompt_file": "voice_design_reference_prompt.safetensors"
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "CustomVoice From Saved Prompt"
+    },
+    "class_type": "Qwen3CustomVoiceFromPrompt",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "prompt": [
+        "2",
+        0
+      ],
+      "text": "같은 목소리를 유지한 채로, 이번에는 조금 더 또렷하고 자신감 있게 말해볼게요.",
+      "seed": 42,
+      "language": "Korean",
+      "instruct": "Keep the same core voice identity, but speak a little more clearly and confidently while staying gentle.",
+      "max_new_tokens": 2048,
+      "temperature": 0.9,
+      "top_p": 0.9
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Save Final Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "3",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/customvoice_from_saved_prompt"
+    }
+  }
+}
