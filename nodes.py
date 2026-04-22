@@ -577,6 +577,66 @@ class Qwen3PromptMaker:
         return (prompt,)
 
 
+class Qwen3ClonePromptFromAudio:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("QWEN3_MODEL",),
+                "ref_audio": ("AUDIO",),
+                "ref_text": ("STRING", {"multiline": True}),
+            },
+            "optional": {
+                "ref_audio_max_seconds": ("FLOAT", {"default": 30.0, "min": -1.0, "max": 120.0, "step": 5.0}),
+                "x_vector_only_mode": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("QWEN3_PROMPT",)
+    RETURN_NAMES = ("prompt",)
+    FUNCTION = "create_prompt"
+    CATEGORY = "Qwen3-TTS"
+
+    def create_prompt(self, model, ref_audio, ref_text, ref_audio_max_seconds=30.0, x_vector_only_mode=False):
+        if getattr(model.model, "tts_model_type", None) != "base":
+            raise ValueError(
+                "Model Type Error: 'model' must be a Base model "
+                "(e.g. Qwen3-TTS-12Hz-1.7B-Base)."
+            )
+
+        audio_tuple = load_audio_input(ref_audio)
+        if audio_tuple is None:
+            raise ValueError("'ref_audio' is required.")
+
+        if ref_audio_max_seconds > 0:
+            wav_data, audio_sr = audio_tuple
+            max_samples = int(ref_audio_max_seconds * audio_sr)
+            if len(wav_data) > max_samples:
+                print(
+                    f"Trimming reference audio from {len(wav_data)/audio_sr:.1f}s "
+                    f"to {ref_audio_max_seconds}s to prevent generation issues"
+                )
+                wav_data = wav_data[:max_samples]
+                audio_tuple = (wav_data, audio_sr)
+
+        try:
+            prompt = model.create_voice_clone_prompt(
+                ref_audio=audio_tuple,
+                ref_text=ref_text,
+                x_vector_only_mode=x_vector_only_mode,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if "does not support" in msg:
+                raise ValueError(
+                    "Model Type Error: 'model' must be a Base model "
+                    "(e.g. Qwen3-TTS-12Hz-1.7B-Base)."
+                ) from e
+            raise
+
+        return (prompt,)
+
+
 class Qwen3SavePrompt:
     """Save a QWEN3_PROMPT (voice clone embedding) to disk as safetensors."""
     
@@ -697,6 +757,128 @@ class Qwen3LoadPrompt:
         return ([item],)
 
 
+class Qwen3CustomVoiceFromPrompt:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("QWEN3_MODEL",),
+                "prompt": ("QWEN3_PROMPT",),
+                "text": ("STRING", {"multiline": True}),
+                "seed": ("INT", {"default": 42, "min": 1, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Auto"}),
+                "instruct": ("STRING", {"multiline": True, "default": ""}),
+                "max_new_tokens": ("INT", {"default": 2048, "min": 64, "max": 8192, "step": 64}),
+                "temperature": ("FLOAT", {"default": 0.9, "min": 0.1, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05}),
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(
+        s,
+        model,
+        prompt,
+        text,
+        seed,
+        language="Auto",
+        instruct="",
+        max_new_tokens=2048,
+        temperature=0.9,
+        top_p=0.9,
+    ):
+        return seed
+
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "generate"
+    CATEGORY = "Qwen3-TTS"
+
+    def generate(
+        self,
+        model,
+        prompt,
+        text,
+        seed,
+        language="Auto",
+        instruct="",
+        max_new_tokens=2048,
+        temperature=0.9,
+        top_p=0.9,
+    ):
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        if getattr(model.model, "tts_model_type", None) != "custom_voice":
+            raise ValueError(
+                "Model Type Error: 'model' must be a CustomVoice model "
+                "(e.g. Qwen3-TTS-12Hz-1.7B-CustomVoice)."
+            )
+        if not text.strip():
+            raise ValueError("'text' must not be empty.")
+
+        lang = language if language != "Auto" else None
+        inst = instruct.strip() or None
+
+        voice_clone_prompt = model._prompt_items_to_voice_clone_prompt(prompt)
+
+        ref_ids = []
+        for item in prompt:
+            if item.ref_text:
+                ref_ids.append(model._tokenize_texts([model._build_ref_text(item.ref_text)])[0])
+            else:
+                ref_ids.append(None)
+
+        input_ids = model._tokenize_texts([model._build_assistant_text(text)])
+        instruct_ids = [
+            model._tokenize_texts([model._build_instruct_text(inst)])[0]
+            if inst
+            else None
+        ]
+        gen_kwargs = model._merge_generate_kwargs(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+
+        talker_codes_list, _ = model.model.generate(
+            input_ids=input_ids,
+            instruct_ids=instruct_ids,
+            ref_ids=ref_ids,
+            voice_clone_prompt=voice_clone_prompt,
+            languages=[lang if lang is not None else "Auto"],
+            speakers=[None],
+            non_streaming_mode=False,
+            **gen_kwargs,
+        )
+
+        ref_code_list = voice_clone_prompt.get("ref_code", None)
+        codes_for_decode = []
+        for index, codes in enumerate(talker_codes_list):
+            if ref_code_list is not None and ref_code_list[index] is not None:
+                codes_for_decode.append(torch.cat([ref_code_list[index].to(codes.device), codes], dim=0))
+            else:
+                codes_for_decode.append(codes)
+
+        wavs_all, sample_rate = model.model.speech_tokenizer.decode(
+            [{"audio_codes": codes} for codes in codes_for_decode]
+        )
+
+        final_wav = wavs_all[0]
+        if ref_code_list is not None and ref_code_list[0] is not None:
+            ref_len = int(ref_code_list[0].shape[0])
+            total_len = int(codes_for_decode[0].shape[0])
+            cut = int(ref_len / max(total_len, 1) * final_wav.shape[0])
+            final_wav = final_wav[cut:]
+
+        return (convert_audio(final_wav, sample_rate),)
+
+
 class Qwen3VoiceClone:
     @classmethod
     def INPUT_TYPES(s):
@@ -780,6 +962,221 @@ class Qwen3VoiceClone:
             raise e
              
         return (convert_audio(wavs[0], sr),)
+
+
+class Qwen3DirectedCloneFromVoiceDesign:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "voice_design_model": ("QWEN3_MODEL",),
+                "base_model": ("QWEN3_MODEL",),
+                "custom_voice_model": ("QWEN3_MODEL",),
+                "design_text": ("STRING", {"multiline": True}),
+                "design_instruct": ("STRING", {"multiline": True}),
+                "target_text": ("STRING", {"multiline": True}),
+                "seed": ("INT", {"default": 42, "min": 1, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Auto"}),
+                "clone_instruct": ("STRING", {"multiline": True, "default": ""}),
+                "ref_audio_max_seconds": ("FLOAT", {"default": 30.0, "min": -1.0, "max": 120.0, "step": 5.0}),
+                "x_vector_only_mode": ("BOOLEAN", {"default": False}),
+                "max_new_tokens": ("INT", {"default": 2048, "min": 64, "max": 8192, "step": 64}),
+                "temperature": ("FLOAT", {"default": 0.9, "min": 0.1, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05}),
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(
+        s,
+        voice_design_model,
+        base_model,
+        custom_voice_model,
+        design_text,
+        design_instruct,
+        target_text,
+        seed,
+        language="Auto",
+        clone_instruct="",
+        ref_audio_max_seconds=30.0,
+        x_vector_only_mode=False,
+        max_new_tokens=2048,
+        temperature=0.9,
+        top_p=0.9,
+    ):
+        return seed
+
+    RETURN_TYPES = ("AUDIO", "QWEN3_PROMPT", "AUDIO")
+    RETURN_NAMES = ("design_audio", "clone_prompt", "audio")
+    FUNCTION = "generate"
+    CATEGORY = "Qwen3-TTS"
+
+    def generate(
+        self,
+        voice_design_model,
+        base_model,
+        custom_voice_model,
+        design_text,
+        design_instruct,
+        target_text,
+        seed,
+        language="Auto",
+        clone_instruct="",
+        ref_audio_max_seconds=30.0,
+        x_vector_only_mode=False,
+        max_new_tokens=2048,
+        temperature=0.9,
+        top_p=0.9,
+    ):
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        lang = language if language != "Auto" else None
+        clone_inst = clone_instruct.strip() or None
+
+        if not design_text.strip():
+            raise ValueError("'design_text' must not be empty.")
+        if not design_instruct.strip():
+            raise ValueError("'design_instruct' must not be empty.")
+        if not target_text.strip():
+            raise ValueError("'target_text' must not be empty.")
+        if getattr(voice_design_model.model, "tts_model_type", None) != "voice_design":
+            raise ValueError(
+                "Model Type Error: 'voice_design_model' must be a VoiceDesign model "
+                "(e.g. Qwen3-TTS-12Hz-1.7B-VoiceDesign)."
+            )
+        if getattr(base_model.model, "tts_model_type", None) != "base":
+            raise ValueError(
+                "Model Type Error: 'base_model' must be a Base model "
+                "(e.g. Qwen3-TTS-12Hz-1.7B-Base)."
+            )
+        if getattr(custom_voice_model.model, "tts_model_type", None) != "custom_voice":
+            raise ValueError(
+                "Model Type Error: 'custom_voice_model' must be a CustomVoice model "
+                "(e.g. Qwen3-TTS-12Hz-1.7B-CustomVoice)."
+            )
+
+        try:
+            design_wavs, design_sr = voice_design_model.generate_voice_design(
+                text=design_text,
+                language=lang,
+                instruct=design_instruct,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if "does not support generate_voice_design" in msg:
+                raise ValueError(
+                    "Model Type Error: 'voice_design_model' must be a VoiceDesign model "
+                    "(e.g. Qwen3-TTS-12Hz-1.7B-VoiceDesign)."
+                ) from e
+            raise
+
+        ref_wav = np.asarray(design_wavs[0], dtype=np.float32)
+        if ref_audio_max_seconds > 0:
+            max_samples = int(ref_audio_max_seconds * design_sr)
+            if len(ref_wav) > max_samples:
+                print(
+                    f"Trimming voice design reference from {len(ref_wav)/design_sr:.1f}s "
+                    f"to {ref_audio_max_seconds}s for clone prompt creation"
+                )
+                ref_wav = ref_wav[:max_samples]
+
+        try:
+            prompt_items = base_model.create_voice_clone_prompt(
+                ref_audio=(ref_wav, design_sr),
+                ref_text=design_text,
+                x_vector_only_mode=x_vector_only_mode,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if "does not support" in msg:
+                raise ValueError(
+                    "Model Type Error: 'base_model' must be a Base model "
+                    "(e.g. Qwen3-TTS-12Hz-1.7B-Base)."
+                ) from e
+            raise
+
+        voice_clone_prompt = base_model._prompt_items_to_voice_clone_prompt(prompt_items)
+        ref_ids = []
+        for item in prompt_items:
+            if item.ref_text:
+                ref_ids.append(
+                    custom_voice_model._tokenize_texts(
+                        [custom_voice_model._build_ref_text(item.ref_text)]
+                    )[0]
+                )
+            else:
+                ref_ids.append(None)
+
+        input_ids = custom_voice_model._tokenize_texts(
+            [custom_voice_model._build_assistant_text(target_text)]
+        )
+        instruct_ids = [
+            custom_voice_model._tokenize_texts(
+                [custom_voice_model._build_instruct_text(clone_inst)]
+            )[0]
+            if clone_inst
+            else None
+        ]
+        gen_kwargs = custom_voice_model._merge_generate_kwargs(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+
+        try:
+            talker_codes_list, _ = custom_voice_model.model.generate(
+                input_ids=input_ids,
+                instruct_ids=instruct_ids,
+                ref_ids=ref_ids,
+                voice_clone_prompt=voice_clone_prompt,
+                languages=[lang if lang is not None else "Auto"],
+                speakers=[None],
+                non_streaming_mode=False,
+                **gen_kwargs,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if "tts_model_type" in msg and "custom_voice" not in msg:
+                raise ValueError(
+                    "Model Type Error: 'custom_voice_model' must be a CustomVoice model "
+                    "(e.g. Qwen3-TTS-12Hz-1.7B-CustomVoice)."
+                ) from e
+            raise
+
+        ref_code_list = voice_clone_prompt.get("ref_code", None)
+        codes_for_decode = []
+        for index, codes in enumerate(talker_codes_list):
+            if ref_code_list is not None and ref_code_list[index] is not None:
+                codes_for_decode.append(torch.cat([ref_code_list[index].to(codes.device), codes], dim=0))
+            else:
+                codes_for_decode.append(codes)
+
+        wavs_all, sample_rate = custom_voice_model.model.speech_tokenizer.decode(
+            [{"audio_codes": codes} for codes in codes_for_decode]
+        )
+
+        final_wav = wavs_all[0]
+        if ref_code_list is not None and ref_code_list[0] is not None:
+            ref_len = int(ref_code_list[0].shape[0])
+            total_len = int(codes_for_decode[0].shape[0])
+            cut = int(ref_len / max(total_len, 1) * final_wav.shape[0])
+            final_wav = final_wav[cut:]
+
+        return (
+            convert_audio(design_wavs[0], design_sr),
+            prompt_items,
+            convert_audio(final_wav, sample_rate),
+        )
 
 class Qwen3DatasetFromFolder:
     @classmethod

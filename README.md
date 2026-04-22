@@ -34,6 +34,9 @@ pip install qwen-tts soundfile librosa safetensors accelerate
 | Qwen3-TTS Voice Clone | Clone voice from reference audio (Base model). Now supports **temperature** and **top_p**. |
 | Qwen3-TTS Custom Voice | Generate with CustomVoice model + instruct. Now supports **temperature** and **top_p**. |
 | Qwen3-TTS Voice Design | Voice design via natural language instruct |
+| Qwen3-TTS Clone Prompt From Audio | Create a clone prompt from any audio source, including VoiceDesign output |
+| Qwen3-TTS Custom Voice From Prompt | Generate consistent CustomVoice speech from clone prompt + instruct |
+| Qwen3-TTS Directed Clone From Voice Design | Hybrid node: VoiceDesign audio -> Base clone prompt -> CustomVoice clone + instruct |
 | Qwen3-TTS Prompt Maker | Create reusable voice clone prompt from reference audio |
 | Qwen3-TTS Save/Load Prompt | Persist voice clone prompts to disk |
 | Qwen3-TTS Dataset Maker | Build fine-tuning dataset from an audio folder |

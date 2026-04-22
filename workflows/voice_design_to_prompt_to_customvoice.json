@@ -1,0 +1,138 @@
+{
+  "1": {
+    "_meta": {
+      "title": "VoiceDesign Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Base Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "CustomVoice Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Voice Design"
+    },
+    "class_type": "Qwen3VoiceDesign",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "text": "안녕하세요. 오늘은 처음 인사드려요.",
+      "instruct": "A soft, breathy young Korean female voice. Calm, gentle, intimate, and emotionally warm.",
+      "language": "Korean",
+      "seed": 42
+    }
+  },
+  "5": {
+    "_meta": {
+      "title": "Save Designed Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "4",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/voice_design_reference"
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Clone Prompt From Designed Audio"
+    },
+    "class_type": "Qwen3ClonePromptFromAudio",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "ref_audio": [
+        "4",
+        0
+      ],
+      "ref_text": "안녕하세요. 오늘은 처음 인사드려요.",
+      "ref_audio_max_seconds": 30.0,
+      "x_vector_only_mode": false
+    }
+  },
+  "7": {
+    "_meta": {
+      "title": "Save Clone Prompt"
+    },
+    "class_type": "Qwen3SavePrompt",
+    "inputs": {
+      "prompt": [
+        "6",
+        0
+      ],
+      "filename": "voice_design_reference_prompt"
+    }
+  },
+  "8": {
+    "_meta": {
+      "title": "CustomVoice From Prompt"
+    },
+    "class_type": "Qwen3CustomVoiceFromPrompt",
+    "inputs": {
+      "model": [
+        "3",
+        0
+      ],
+      "prompt": [
+        "6",
+        0
+      ],
+      "text": "지금은 조금 떨리지만, 그래도 차분하게 이야기해볼게요.",
+      "seed": 42,
+      "language": "Korean",
+      "instruct": "Speak softly and consistently in the same designed voice. Keep the tone gentle, warm, and slightly breathy.",
+      "max_new_tokens": 2048,
+      "temperature": 0.9,
+      "top_p": 0.9
+    }
+  },
+  "9": {
+    "_meta": {
+      "title": "Save Final Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "8",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/customvoice_from_prompt"
+    }
+  }
+}
