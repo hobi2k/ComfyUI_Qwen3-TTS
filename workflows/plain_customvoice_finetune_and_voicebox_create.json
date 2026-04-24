@@ -1,0 +1,32 @@
+{
+  "1": {
+    "_meta": {
+      "title": "Plain CustomVoice Finetune"
+    },
+    "class_type": "Qwen3PlainCustomVoiceFineTune",
+    "inputs": {
+      "train_jsonl": "/absolute/path/to/prepared.jsonl",
+      "init_customvoice_model_path": "/absolute/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "output_dir": "/absolute/path/to/output/plain_customvoice_run",
+      "speaker_name": "mai",
+      "speaker_encoder_model_path": "/absolute/path/to/Qwen3-TTS-12Hz-1.7B-Base",
+      "batch_size": 1,
+      "lr": 2e-05,
+      "num_epochs": 3
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "VoiceBox Create"
+    },
+    "class_type": "Qwen3VoiceBoxCreate",
+    "inputs": {
+      "input_customvoice_checkpoint": [
+        "1",
+        0
+      ],
+      "speaker_encoder_source": "/absolute/path/to/Qwen3-TTS-12Hz-1.7B-Base",
+      "output_checkpoint": "/absolute/path/to/output/voicebox_from_plain"
+    }
+  }
+}

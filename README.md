@@ -34,6 +34,7 @@ pip install qwen-tts soundfile librosa safetensors accelerate
 | Qwen3-TTS Voice Clone | Clone voice from reference audio (Base model). Now supports **temperature** and **top_p**. |
 | Qwen3-TTS Custom Voice | Generate with CustomVoice model + instruct. Now supports **temperature** and **top_p**. |
 | Qwen3-TTS Voice Design | Voice design via natural language instruct |
+| Qwen3-TTS Base+CustomVoice Clone+Instruct | Demo-style hybrid inference: Base clone prompt + CustomVoice instruct |
 | Qwen3-TTS Clone Prompt From Audio | Create a clone prompt from any audio source, including VoiceDesign output |
 | Qwen3-TTS Custom Voice From Prompt | Generate consistent CustomVoice speech from clone prompt + instruct |
 | Qwen3-TTS Directed Clone From Voice Design | Hybrid node: VoiceDesign audio -> Base clone prompt -> CustomVoice clone + instruct |
@@ -42,6 +43,10 @@ pip install qwen-tts soundfile librosa safetensors accelerate
 | Qwen3-TTS Dataset Maker | Build fine-tuning dataset from an audio folder |
 | Qwen3-TTS Data Prep | Tokenize dataset for fine-tuning |
 | Qwen3-TTS Finetune | Fine-tune node (use sft_12hz_v4 backend for instruct-aware training) |
+| Qwen3-TTS Plain CustomVoice Finetune | Standalone plain CustomVoice fine-tuning copied from the demo flow |
+| Qwen3-TTS VoiceBox Create | Convert a plain CustomVoice checkpoint into a self-contained VoiceBox checkpoint |
+| Qwen3-TTS VoiceBox Bootstrap Finetune | Train a VoiceBox checkpoint directly from CustomVoice + Base speaker encoder |
+| Qwen3-TTS VoiceBox Finetune | Run `VoiceBox -> VoiceBox` fine-tuning on an existing VoiceBox checkpoint |
 | Qwen3-TTS Audio Compare | Compare two audio outputs |
 
 ## CLI Scripts

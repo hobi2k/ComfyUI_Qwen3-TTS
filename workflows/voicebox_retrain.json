@@ -1,0 +1,17 @@
+{
+  "1": {
+    "_meta": {
+      "title": "VoiceBox Finetune"
+    },
+    "class_type": "Qwen3VoiceBoxFineTune",
+    "inputs": {
+      "train_jsonl": "/absolute/path/to/prepared.jsonl",
+      "init_voicebox_model_path": "/absolute/path/to/output/voicebox_bootstrap_run/final",
+      "output_dir": "/absolute/path/to/output/voicebox_retrain_run",
+      "speaker_name": "mai",
+      "batch_size": 1,
+      "lr": 2e-06,
+      "num_epochs": 1
+    }
+  }
+}

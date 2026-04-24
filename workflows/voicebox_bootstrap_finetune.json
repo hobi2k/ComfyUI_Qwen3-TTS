@@ -1,0 +1,18 @@
+{
+  "1": {
+    "_meta": {
+      "title": "VoiceBox Bootstrap Finetune"
+    },
+    "class_type": "Qwen3VoiceBoxBootstrapFineTune",
+    "inputs": {
+      "train_jsonl": "/absolute/path/to/prepared.jsonl",
+      "init_customvoice_model_path": "/absolute/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "base_speaker_encoder_model_path": "/absolute/path/to/Qwen3-TTS-12Hz-1.7B-Base",
+      "output_dir": "/absolute/path/to/output/voicebox_bootstrap_run",
+      "speaker_name": "mai",
+      "batch_size": 1,
+      "lr": 2e-06,
+      "num_epochs": 1
+    }
+  }
+}

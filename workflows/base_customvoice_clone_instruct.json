@@ -1,0 +1,93 @@
+{
+  "1": {
+    "_meta": {
+      "title": "Base Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "CustomVoice Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Load Reference Audio"
+    },
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "reference.wav"
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Base+CustomVoice Clone+Instruct"
+    },
+    "class_type": "Qwen3BaseCustomVoiceCloneInstruct",
+    "inputs": {
+      "base_model": [
+        "1",
+        0
+      ],
+      "custom_voice_model": [
+        "2",
+        0
+      ],
+      "ref_audio": [
+        "3",
+        0
+      ],
+      "ref_text": "안녕하세요. 오늘 분위기를 조금 조용하게 잡아볼게요.",
+      "text": "같은 목소리를 유지하면서도 조금 더 다정하고 차분하게 말해볼게요.",
+      "seed": 42,
+      "language": "Korean",
+      "instruct": "Speak gently, warmly, and consistently in the cloned voice.",
+      "ref_audio_max_seconds": 30.0,
+      "x_vector_only_mode": false,
+      "max_new_tokens": 2048,
+      "temperature": 0.9,
+      "top_p": 0.9
+    }
+  },
+  "5": {
+    "_meta": {
+      "title": "Save Prompt"
+    },
+    "class_type": "Qwen3SavePrompt",
+    "inputs": {
+      "prompt": [
+        "4",
+        0
+      ],
+      "filename": "base_customvoice_clone_prompt"
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Save Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "4",
+        1
+      ],
+      "filename_prefix": "qwen3_tts/base_customvoice_clone_instruct"
+    }
+  }
+}

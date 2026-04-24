@@ -7,6 +7,7 @@ import io
 import logging
 import hashlib
 import math
+from pathlib import Path
 from datetime import datetime, timezone
 import soundfile as sf
 import numpy as np
@@ -14,6 +15,8 @@ import folder_paths
 import comfy.model_management as mm
 from server import PromptServer
 from qwen_tts import Qwen3TTSModel, Qwen3TTSTokenizer
+from qwen_tts.core.models import Qwen3TTSConfig, Qwen3TTSForConditionalGeneration, Qwen3TTSProcessor
+from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSSpeakerEncoder
 from qwen_tts.inference.qwen3_tts_model import VoiceClonePromptItem
 from .dataset import TTSDataset
 from accelerate import Accelerator
@@ -24,8 +27,9 @@ try:
 except ImportError:
     HAS_BNB = False
 from torch.utils.data import DataLoader
-from transformers import AutoConfig, get_linear_schedule_with_warmup
+from transformers import AutoConfig, AutoModel, AutoProcessor, get_linear_schedule_with_warmup
 from transformers.utils import cached_file
+from safetensors import safe_open
 from safetensors.torch import save_file, load_file
 
 # Register Qwen3-TTS models folder with ComfyUI
@@ -56,6 +60,206 @@ def get_local_model_path(repo_id: str) -> str:
     """Get the local path for a model/tokenizer in ComfyUI's models folder."""
     folder_name = QWEN3_TTS_MODELS.get(repo_id) or QWEN3_TTS_TOKENIZERS.get(repo_id) or repo_id.replace("/", "_")
     return os.path.join(QWEN3_TTS_MODELS_DIR, folder_name)
+
+def send_progress_text(unique_id, text: str) -> None:
+    if unique_id:
+        PromptServer.instance.send_progress_text(text, unique_id)
+
+def is_voicebox_checkpoint_dir(model_path: str | Path) -> bool:
+    try:
+        config_path = Path(model_path) / "config.json"
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(raw.get("demo_model_family") == "voicebox" and raw.get("speaker_encoder_included"))
+
+def load_voicebox_model(pretrained_model_name_or_path: str, **kwargs):
+    AutoConfig.register("qwen3_tts", Qwen3TTSConfig)
+    AutoModel.register(Qwen3TTSConfig, Qwen3TTSForConditionalGeneration)
+    AutoProcessor.register(Qwen3TTSConfig, Qwen3TTSProcessor)
+
+    config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+    runtime_tts_model_type = config.tts_model_type
+    config.tts_model_type = "base"
+
+    model = AutoModel.from_pretrained(pretrained_model_name_or_path, config=config, **kwargs)
+    if not isinstance(model, Qwen3TTSForConditionalGeneration):
+        raise TypeError(f"Expected Qwen3TTSForConditionalGeneration, got {type(model)}")
+
+    model.tts_model_type = runtime_tts_model_type
+    model.config.tts_model_type = runtime_tts_model_type
+    processor = AutoProcessor.from_pretrained(pretrained_model_name_or_path, fix_mistral_regex=True)
+    return Qwen3TTSModel(model=model, processor=processor, generate_defaults=model.generate_config)
+
+def load_qwen_or_voicebox_model(pretrained_model_name_or_path: str, **kwargs):
+    checkpoint_dir = Path(pretrained_model_name_or_path)
+    if checkpoint_dir.is_dir() and is_voicebox_checkpoint_dir(checkpoint_dir):
+        return load_voicebox_model(str(checkpoint_dir), **kwargs)
+    return Qwen3TTSModel.from_pretrained(pretrained_model_name_or_path, **kwargs)
+
+def resolve_training_output_dir(output_dir: str) -> str:
+    output_path = Path(output_dir).resolve()
+    final_dir = output_path / "final"
+    if final_dir.exists():
+        return str(final_dir)
+    return str(output_path)
+
+def resolve_training_attention() -> str:
+    try:
+        import flash_attn  # noqa: F401
+        import importlib.metadata
+        importlib.metadata.version("flash_attn")
+        return "flash_attention_2"
+    except Exception:
+        return "sdpa"
+
+def resolve_training_runtime() -> dict:
+    device = mm.get_torch_device()
+    if device.type == "cuda":
+        return {
+            "device": device,
+            "dtype": torch.bfloat16,
+            "mixed_precision": "bf16",
+            "attention": resolve_training_attention(),
+        }
+    return {
+        "device": device,
+        "dtype": torch.float32,
+        "mixed_precision": "no",
+        "attention": "sdpa",
+    }
+
+def resolve_jsonl_audio_path(raw_path: str, jsonl_path: Path) -> str:
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return str(candidate)
+    from_jsonl_dir = (jsonl_path.resolve().parent / candidate).resolve()
+    if from_jsonl_dir.exists():
+        return str(from_jsonl_dir)
+    return str(candidate.resolve())
+
+def load_jsonl_records(path: Path) -> list[dict]:
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+def sanitize_speaker_encoder_config(config_dict: dict | None) -> dict | None:
+    if config_dict is None:
+        return None
+    allowed_keys = {
+        "mel_dim",
+        "enc_dim",
+        "enc_channels",
+        "enc_kernel_sizes",
+        "enc_dilations",
+        "enc_attention_channels",
+        "enc_res2net_scale",
+        "enc_se_channels",
+        "sample_rate",
+    }
+    return {key: value for key, value in dict(config_dict).items() if key in allowed_keys}
+
+def checkpoint_has_speaker_encoder(model_path: Path) -> bool:
+    weights_path = model_path / "model.safetensors"
+    if not weights_path.exists():
+        return False
+    with safe_open(str(weights_path), framework="pt", device="cpu") as handle:
+        return any(key.startswith("speaker_encoder.") for key in handle.keys())
+
+def load_speaker_encoder(model_path: Path, runtime: dict) -> Qwen3TTSSpeakerEncoder:
+    config = Qwen3TTSConfig.from_pretrained(str(model_path))
+    speaker_encoder_config = config.speaker_encoder_config
+    if speaker_encoder_config is None:
+        raw_config = json.loads((model_path / "config.json").read_text(encoding="utf-8"))
+        source_model_path = raw_config.get("speaker_encoder_source_model_path")
+        if source_model_path:
+            source_config = Qwen3TTSConfig.from_pretrained(str(Path(source_model_path)))
+            speaker_encoder_config = source_config.speaker_encoder_config
+    if speaker_encoder_config is None:
+        raise ValueError(f"No speaker_encoder_config available in {model_path}")
+
+    speaker_encoder = Qwen3TTSSpeakerEncoder(speaker_encoder_config)
+    speaker_state = {}
+    with safe_open(str(model_path / "model.safetensors"), framework="pt", device="cpu") as handle:
+        for key in handle.keys():
+            if key.startswith("speaker_encoder."):
+                speaker_state[key.removeprefix("speaker_encoder.")] = handle.get_tensor(key)
+    if not speaker_state:
+        raise ValueError(f"No speaker_encoder weights found in {model_path}")
+    speaker_encoder.load_state_dict(speaker_state)
+    speaker_encoder = speaker_encoder.to(device=runtime["device"], dtype=runtime["dtype"])
+    speaker_encoder.eval()
+    return speaker_encoder
+
+def resolve_speaker_encoder_source(init_model_path: Path, speaker_encoder_model_path: Path | None) -> Path | None:
+    if speaker_encoder_model_path is not None and speaker_encoder_model_path.exists():
+        return speaker_encoder_model_path
+    guessed = Path(str(init_model_path).replace("CustomVoice", "Base"))
+    if guessed != init_model_path and guessed.exists():
+        return guessed
+    return init_model_path if init_model_path.exists() else None
+
+def resolve_voicebox_speaker_encoder(qwen3tts: Qwen3TTSModel, init_model_path: Path, runtime: dict, speaker_encoder_model_path: Path | None):
+    embedded = getattr(qwen3tts.model, "speaker_encoder", None)
+    if embedded is not None:
+        embedded = embedded.to(device=runtime["device"], dtype=runtime["dtype"])
+        embedded.eval()
+        return embedded
+    if checkpoint_has_speaker_encoder(init_model_path):
+        return load_speaker_encoder(init_model_path, runtime)
+    speaker_source = resolve_speaker_encoder_source(init_model_path, speaker_encoder_model_path)
+    if speaker_source is None:
+        raise ValueError("A speaker encoder source model is required.")
+    return load_speaker_encoder(speaker_source, runtime)
+
+def resolve_output_speaker_id(talker_config: dict, speaker_name: str) -> int:
+    spk_id_map = dict(talker_config.get("spk_id", {}) or {})
+    if speaker_name in spk_id_map:
+        return int(spk_id_map[speaker_name])
+    if not spk_id_map:
+        return 3000
+    return max(int(value) for value in spk_id_map.values()) + 1
+
+def voicebox_metadata(*, source_checkpoint: Path, speaker_encoder_included: bool, speaker_encoder_source_path: str | None) -> dict:
+    speaker_encoder_config = None
+    if speaker_encoder_source_path:
+        source_config = Qwen3TTSConfig.from_pretrained(str(Path(speaker_encoder_source_path)))
+        speaker_encoder_config = source_config.speaker_encoder_config
+        if speaker_encoder_config is not None and hasattr(speaker_encoder_config, "to_dict"):
+            speaker_encoder_config = speaker_encoder_config.to_dict()
+        speaker_encoder_config = sanitize_speaker_encoder_config(speaker_encoder_config)
+    return {
+        "demo_model_family": "voicebox",
+        "speaker_encoder_included": bool(speaker_encoder_included),
+        "speaker_encoder_source_model_path": speaker_encoder_source_path,
+        "speaker_encoder_config": speaker_encoder_config,
+        "voicebox_source_checkpoint": str(source_checkpoint),
+    }
+
+def checkpoint_epoch(path: Path) -> int:
+    name = path.name
+    if name.startswith("checkpoint-epoch-"):
+        try:
+            return int(name.split("-")[-1])
+        except ValueError:
+            return -1
+    return -1
+
+def finalize_checkpoint_layout(output_model_path: Path) -> Path:
+    checkpoints = [path for path in output_model_path.glob("checkpoint-epoch-*") if path.is_dir()]
+    if not checkpoints:
+        final_dir = output_model_path / "final"
+        return final_dir if final_dir.exists() else output_model_path
+    latest = max(checkpoints, key=checkpoint_epoch)
+    final_dir = output_model_path / "final"
+    if final_dir.exists():
+        shutil.rmtree(final_dir)
+    shutil.copytree(latest, final_dir)
+    for checkpoint in checkpoints:
+        shutil.rmtree(checkpoint)
+    return final_dir
 
 def compute_file_hash(file_path: str) -> str:
     """Compute SHA256 hash of file content."""
@@ -239,6 +443,220 @@ def load_audio_input(audio_input):
 
     return (wav.numpy(), sr)
 
+def train_customvoice_family_model(
+    *,
+    train_jsonl_path: str,
+    init_model_path: str,
+    output_dir: str,
+    speaker_name: str,
+    batch_size: int,
+    lr: float,
+    num_epochs: int,
+    speaker_encoder_model_path: str = "",
+    embed_speaker_encoder: bool = False,
+    unique_id=None,
+):
+    runtime = resolve_training_runtime()
+    init_model_dir = Path(init_model_path).resolve()
+    output_model_path = Path(output_dir).resolve()
+    train_jsonl = Path(train_jsonl_path).resolve()
+    speaker_encoder_path = Path(speaker_encoder_model_path).resolve() if speaker_encoder_model_path.strip() else None
+
+    if not init_model_dir.exists():
+        raise ValueError(f"Init model not found: {init_model_dir}")
+    if not train_jsonl.exists():
+        raise ValueError(f"Training JSONL not found: {train_jsonl}")
+    if speaker_encoder_path is not None and not speaker_encoder_path.exists():
+        raise ValueError(f"Speaker encoder source not found: {speaker_encoder_path}")
+
+    output_model_path.mkdir(parents=True, exist_ok=True)
+    send_progress_text(unique_id, "Loading training model...")
+
+    qwen3tts = load_qwen_or_voicebox_model(
+        str(init_model_dir),
+        device_map=runtime["device"],
+        dtype=runtime["dtype"],
+        attn_implementation=runtime["attention"],
+    )
+    config = AutoConfig.from_pretrained(str(init_model_dir))
+    auxiliary_speaker_encoder = resolve_voicebox_speaker_encoder(
+        qwen3tts=qwen3tts,
+        init_model_path=init_model_dir,
+        runtime=runtime,
+        speaker_encoder_model_path=speaker_encoder_path,
+    )
+
+    train_data = load_jsonl_records(train_jsonl)
+    for row in train_data:
+        if "audio" in row:
+            row["audio"] = resolve_jsonl_audio_path(str(row["audio"]), train_jsonl)
+        if "ref_audio" in row:
+            row["ref_audio"] = resolve_jsonl_audio_path(str(row["ref_audio"]), train_jsonl)
+
+    dataset = TTSDataset(train_data, qwen3tts.processor, config)
+    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=dataset.collate_fn)
+    optimizer = AdamW(qwen3tts.model.parameters(), lr=lr, weight_decay=0.01, foreach=False, fused=False)
+
+    accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision=runtime["mixed_precision"])
+    model, optimizer, train_dataloader = accelerator.prepare(qwen3tts.model, optimizer, train_dataloader)
+    model.train()
+
+    target_speaker_embedding = None
+    checkpoint_embeds_encoder = checkpoint_has_speaker_encoder(init_model_dir)
+    speaker_source = resolve_speaker_encoder_source(init_model_dir, speaker_encoder_path)
+
+    for epoch in range(num_epochs):
+        send_progress_text(unique_id, f"Epoch {epoch + 1}/{num_epochs} training...")
+        for step, batch in enumerate(train_dataloader):
+            with accelerator.accumulate(model):
+                input_ids = batch["input_ids"]
+                codec_ids = batch["codec_ids"]
+                ref_mels = batch["ref_mels"]
+                text_embedding_mask = batch["text_embedding_mask"]
+                codec_embedding_mask = batch["codec_embedding_mask"]
+                attention_mask = batch["attention_mask"]
+                codec_0_labels = batch["codec_0_labels"]
+                codec_mask = batch["codec_mask"]
+
+                current_model = accelerator.unwrap_model(model)
+                speaker_encoder = getattr(current_model, "speaker_encoder", None) or auxiliary_speaker_encoder
+                model_device = next(current_model.parameters()).device
+                model_dtype = next(current_model.parameters()).dtype
+                speaker_embedding = speaker_encoder(ref_mels.to(model_device).to(model_dtype)).detach()
+                if target_speaker_embedding is None:
+                    target_speaker_embedding = speaker_embedding
+
+                input_text_ids = input_ids[:, :, 0]
+                input_codec_ids = input_ids[:, :, 1]
+                input_text_embedding = current_model.talker.model.text_embedding(input_text_ids) * text_embedding_mask
+                input_codec_embedding = current_model.talker.model.codec_embedding(input_codec_ids) * codec_embedding_mask
+                input_codec_embedding[:, 6, :] = speaker_embedding
+                input_embeddings = input_text_embedding + input_codec_embedding
+
+                for index in range(1, 16):
+                    codec_i_embedding = current_model.talker.code_predictor.get_input_embeddings()[index - 1](codec_ids[:, :, index])
+                    codec_i_embedding = codec_i_embedding * codec_mask.unsqueeze(-1)
+                    input_embeddings = input_embeddings + codec_i_embedding
+
+                outputs = current_model.talker(
+                    inputs_embeds=input_embeddings[:, :-1, :],
+                    attention_mask=attention_mask[:, :-1],
+                    labels=codec_0_labels[:, 1:],
+                    output_hidden_states=True,
+                )
+
+                hidden_states = outputs.hidden_states[0][-1]
+                talker_hidden_states = hidden_states[codec_mask[:, :-1]]
+                talker_codec_ids = codec_ids[codec_mask]
+                _, sub_talker_loss = current_model.talker.forward_sub_talker_finetune(talker_codec_ids, talker_hidden_states)
+                loss = outputs.loss + 0.3 * sub_talker_loss
+
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+            if step % 10 == 0:
+                status = f"Epoch {epoch} | Step {step} | Loss: {loss.item():.4f}"
+                print(status)
+                send_progress_text(unique_id, status)
+
+        if accelerator.is_main_process:
+            checkpoint_dir = output_model_path / f"checkpoint-epoch-{epoch}"
+            if checkpoint_dir.exists():
+                shutil.rmtree(checkpoint_dir)
+            shutil.copytree(str(init_model_dir), str(checkpoint_dir), dirs_exist_ok=True)
+
+            config_dict = json.loads((init_model_dir / "config.json").read_text(encoding="utf-8"))
+            config_dict["tts_model_type"] = "custom_voice"
+            talker_config = dict(config_dict.get("talker_config", {}) or {})
+            spk_id_map = dict(talker_config.get("spk_id", {}) or {})
+            spk_is_dialect = dict(talker_config.get("spk_is_dialect", {}) or {})
+            speaker_id = resolve_output_speaker_id(talker_config, speaker_name)
+            spk_id_map[speaker_name] = speaker_id
+            spk_is_dialect[speaker_name] = False
+            talker_config["spk_id"] = spk_id_map
+            talker_config["spk_is_dialect"] = spk_is_dialect
+            config_dict["talker_config"] = talker_config
+
+            if embed_speaker_encoder:
+                config_dict.update(
+                    voicebox_metadata(
+                        source_checkpoint=init_model_dir,
+                        speaker_encoder_included=True,
+                        speaker_encoder_source_path=str(init_model_dir if checkpoint_embeds_encoder else speaker_source) if speaker_source else None,
+                    )
+                )
+            else:
+                config_dict.pop("demo_model_family", None)
+                config_dict.pop("speaker_encoder_included", None)
+                config_dict.pop("speaker_encoder_source_model_path", None)
+                config_dict.pop("speaker_encoder_config", None)
+                config_dict.pop("voicebox_source_checkpoint", None)
+
+            (checkpoint_dir / "config.json").write_text(
+                json.dumps(config_dict, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            unwrapped_model = accelerator.unwrap_model(model)
+            state_dict = {key: value.detach().to("cpu") for key, value in unwrapped_model.state_dict().items()}
+
+            if embed_speaker_encoder:
+                speaker_encoder_state = {
+                    f"speaker_encoder.{key}": value.detach().to("cpu")
+                    for key, value in auxiliary_speaker_encoder.state_dict().items()
+                }
+                state_dict.update(speaker_encoder_state)
+            else:
+                state_dict = {key: value for key, value in state_dict.items() if not key.startswith("speaker_encoder.")}
+
+            codec_weight = state_dict["talker.model.codec_embedding.weight"]
+            state_dict["talker.model.codec_embedding.weight"][speaker_id] = target_speaker_embedding[0].detach().to(codec_weight.dtype)
+            save_file(state_dict, str(checkpoint_dir / "model.safetensors"))
+
+    final_path = finalize_checkpoint_layout(output_model_path)
+    send_progress_text(unique_id, f"Training complete: {final_path}")
+    return str(final_path), speaker_name
+
+def create_voicebox_checkpoint_internal(*, input_checkpoint: str, speaker_encoder_source: str, output_checkpoint: str) -> str:
+    input_checkpoint_path = Path(input_checkpoint).resolve()
+    speaker_source_path = Path(speaker_encoder_source).resolve()
+    output_checkpoint_path = Path(output_checkpoint).resolve()
+
+    if not input_checkpoint_path.exists():
+        raise ValueError(f"Input checkpoint not found: {input_checkpoint_path}")
+    if not speaker_source_path.exists():
+        raise ValueError(f"Speaker encoder source not found: {speaker_source_path}")
+
+    if output_checkpoint_path.exists():
+        shutil.rmtree(output_checkpoint_path)
+    shutil.copytree(input_checkpoint_path, output_checkpoint_path)
+
+    state_dict = load_file(str(output_checkpoint_path / "model.safetensors"))
+    speaker_source_state = load_file(str(speaker_source_path / "model.safetensors"))
+    speaker_encoder_state = {
+        key: value for key, value in speaker_source_state.items() if key.startswith("speaker_encoder.")
+    }
+    if not speaker_encoder_state:
+        raise ValueError(f"No speaker_encoder weights found in {speaker_source_path}")
+    state_dict.update(speaker_encoder_state)
+    save_file(state_dict, str(output_checkpoint_path / "model.safetensors"))
+
+    config = json.loads((output_checkpoint_path / "config.json").read_text(encoding="utf-8"))
+    source_config = json.loads((speaker_source_path / "config.json").read_text(encoding="utf-8"))
+    config["tts_model_type"] = "custom_voice"
+    config["demo_model_family"] = "voicebox"
+    config["speaker_encoder_included"] = True
+    config["speaker_encoder_source_model_path"] = str(speaker_source_path)
+    config["speaker_encoder_config"] = sanitize_speaker_encoder_config(source_config.get("speaker_encoder_config"))
+    (output_checkpoint_path / "config.json").write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return str(output_checkpoint_path)
+
 class Qwen3Loader:
     @classmethod
     def INPUT_TYPES(s):
@@ -315,7 +733,7 @@ class Qwen3Loader:
 
         print(f"Using attention implementation: {attn_impl}")
 
-        model = Qwen3TTSModel.from_pretrained(
+        model = load_qwen_or_voicebox_model(
             model_path,
             device_map=device,
             dtype=dtype,
@@ -1177,6 +1595,304 @@ class Qwen3DirectedCloneFromVoiceDesign:
             prompt_items,
             convert_audio(final_wav, sample_rate),
         )
+
+
+class Qwen3BaseCustomVoiceCloneInstruct:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "base_model": ("QWEN3_MODEL",),
+                "custom_voice_model": ("QWEN3_MODEL",),
+                "ref_audio": ("AUDIO",),
+                "ref_text": ("STRING", {"multiline": True}),
+                "text": ("STRING", {"multiline": True}),
+                "seed": ("INT", {"default": 42, "min": 1, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Auto"}),
+                "instruct": ("STRING", {"multiline": True, "default": ""}),
+                "ref_audio_max_seconds": ("FLOAT", {"default": 30.0, "min": -1.0, "max": 120.0, "step": 5.0}),
+                "x_vector_only_mode": ("BOOLEAN", {"default": False}),
+                "max_new_tokens": ("INT", {"default": 2048, "min": 64, "max": 8192, "step": 64}),
+                "temperature": ("FLOAT", {"default": 0.9, "min": 0.1, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05}),
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(
+        s,
+        base_model,
+        custom_voice_model,
+        ref_audio,
+        ref_text,
+        text,
+        seed,
+        language="Auto",
+        instruct="",
+        ref_audio_max_seconds=30.0,
+        x_vector_only_mode=False,
+        max_new_tokens=2048,
+        temperature=0.9,
+        top_p=0.9,
+    ):
+        return seed
+
+    RETURN_TYPES = ("QWEN3_PROMPT", "AUDIO")
+    RETURN_NAMES = ("clone_prompt", "audio")
+    FUNCTION = "generate"
+    CATEGORY = "Qwen3-TTS"
+
+    def generate(
+        self,
+        base_model,
+        custom_voice_model,
+        ref_audio,
+        ref_text,
+        text,
+        seed,
+        language="Auto",
+        instruct="",
+        ref_audio_max_seconds=30.0,
+        x_vector_only_mode=False,
+        max_new_tokens=2048,
+        temperature=0.9,
+        top_p=0.9,
+    ):
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        if getattr(base_model.model, "tts_model_type", None) != "base":
+            raise ValueError("Model Type Error: 'base_model' must be a Base model.")
+        if getattr(custom_voice_model.model, "tts_model_type", None) != "custom_voice":
+            raise ValueError("Model Type Error: 'custom_voice_model' must be a CustomVoice model.")
+
+        lang = language if language != "Auto" else None
+        inst = instruct.strip() or None
+
+        audio_tuple = load_audio_input(ref_audio)
+        if audio_tuple is None:
+            raise ValueError("'ref_audio' is required.")
+
+        if ref_audio_max_seconds > 0:
+            wav_data, audio_sr = audio_tuple
+            max_samples = int(ref_audio_max_seconds * audio_sr)
+            if len(wav_data) > max_samples:
+                wav_data = wav_data[:max_samples]
+                audio_tuple = (wav_data, audio_sr)
+
+        prompt_items = base_model.create_voice_clone_prompt(
+            ref_audio=audio_tuple,
+            ref_text=ref_text,
+            x_vector_only_mode=x_vector_only_mode,
+        )
+        voice_clone_prompt = custom_voice_model._prompt_items_to_voice_clone_prompt(prompt_items)
+        ref_ids = []
+        for item in prompt_items:
+            if item.ref_text:
+                ref_ids.append(custom_voice_model._tokenize_texts([custom_voice_model._build_ref_text(item.ref_text)])[0])
+            else:
+                ref_ids.append(None)
+
+        input_ids = custom_voice_model._tokenize_texts([custom_voice_model._build_assistant_text(text)])
+        instruct_ids = [custom_voice_model._tokenize_texts([custom_voice_model._build_instruct_text(inst)])[0] if inst else None]
+        gen_kwargs = custom_voice_model._merge_generate_kwargs(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        talker_codes_list, _ = custom_voice_model.model.generate(
+            input_ids=input_ids,
+            instruct_ids=instruct_ids,
+            ref_ids=ref_ids,
+            voice_clone_prompt=voice_clone_prompt,
+            languages=[lang if lang is not None else "Auto"],
+            speakers=[None],
+            non_streaming_mode=False,
+            **gen_kwargs,
+        )
+
+        ref_code_list = voice_clone_prompt.get("ref_code", None)
+        codes_for_decode = []
+        for index, codes in enumerate(talker_codes_list):
+            if ref_code_list is not None and ref_code_list[index] is not None:
+                codes_for_decode.append(torch.cat([ref_code_list[index].to(codes.device), codes], dim=0))
+            else:
+                codes_for_decode.append(codes)
+
+        wavs_all, sample_rate = custom_voice_model.model.speech_tokenizer.decode(
+            [{"audio_codes": codes} for codes in codes_for_decode]
+        )
+        final_wav = wavs_all[0]
+        if ref_code_list is not None and ref_code_list[0] is not None:
+            ref_len = int(ref_code_list[0].shape[0])
+            total_len = int(codes_for_decode[0].shape[0])
+            cut = int(ref_len / max(total_len, 1) * final_wav.shape[0])
+            final_wav = final_wav[cut:]
+
+        return (prompt_items, convert_audio(final_wav, sample_rate))
+
+
+class Qwen3PlainCustomVoiceFineTune:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "train_jsonl": ("STRING", {"default": "", "multiline": False}),
+                "init_customvoice_model_path": ("STRING", {"default": get_local_model_path("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"), "multiline": False}),
+                "output_dir": ("STRING", {"default": "output/plain_customvoice_run", "multiline": False}),
+                "speaker_name": ("STRING", {"default": "mai"}),
+            },
+            "optional": {
+                "speaker_encoder_model_path": ("STRING", {"default": get_local_model_path("Qwen/Qwen3-TTS-12Hz-1.7B-Base"), "multiline": False}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 64}),
+                "lr": ("FLOAT", {"default": 2e-5, "step": 1e-7}),
+                "num_epochs": ("INT", {"default": 3, "min": 1, "max": 1000}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("model_path", "custom_speaker_name")
+    FUNCTION = "train"
+    CATEGORY = "Qwen3-TTS/FineTuning"
+
+    def train(self, train_jsonl, init_customvoice_model_path, output_dir, speaker_name, speaker_encoder_model_path="", batch_size=1, lr=2e-5, num_epochs=3, unique_id=None):
+        model_path, custom_speaker_name = train_customvoice_family_model(
+            train_jsonl_path=train_jsonl,
+            init_model_path=init_customvoice_model_path,
+            output_dir=output_dir,
+            speaker_name=speaker_name,
+            batch_size=batch_size,
+            lr=lr,
+            num_epochs=num_epochs,
+            speaker_encoder_model_path=speaker_encoder_model_path,
+            embed_speaker_encoder=False,
+            unique_id=unique_id,
+        )
+        return (model_path, custom_speaker_name)
+
+
+class Qwen3VoiceBoxCreate:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "input_customvoice_checkpoint": ("STRING", {"default": "", "multiline": False}),
+                "speaker_encoder_source": ("STRING", {"default": get_local_model_path("Qwen/Qwen3-TTS-12Hz-1.7B-Base"), "multiline": False}),
+                "output_checkpoint": ("STRING", {"default": "output/voicebox_checkpoint", "multiline": False}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("voicebox_model_path",)
+    FUNCTION = "create"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def create(self, input_customvoice_checkpoint, speaker_encoder_source, output_checkpoint, unique_id=None):
+        send_progress_text(unique_id, "Creating VoiceBox checkpoint...")
+        return (
+            create_voicebox_checkpoint_internal(
+                input_checkpoint=input_customvoice_checkpoint,
+                speaker_encoder_source=speaker_encoder_source,
+                output_checkpoint=output_checkpoint,
+            ),
+        )
+
+
+class Qwen3VoiceBoxBootstrapFineTune:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "train_jsonl": ("STRING", {"default": "", "multiline": False}),
+                "init_customvoice_model_path": ("STRING", {"default": get_local_model_path("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"), "multiline": False}),
+                "base_speaker_encoder_model_path": ("STRING", {"default": get_local_model_path("Qwen/Qwen3-TTS-12Hz-1.7B-Base"), "multiline": False}),
+                "output_dir": ("STRING", {"default": "output/voicebox_bootstrap_run", "multiline": False}),
+                "speaker_name": ("STRING", {"default": "mai"}),
+            },
+            "optional": {
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 64}),
+                "lr": ("FLOAT", {"default": 2e-6, "step": 1e-7}),
+                "num_epochs": ("INT", {"default": 1, "min": 1, "max": 1000}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("voicebox_model_path", "custom_speaker_name")
+    FUNCTION = "train"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def train(self, train_jsonl, init_customvoice_model_path, base_speaker_encoder_model_path, output_dir, speaker_name, batch_size=1, lr=2e-6, num_epochs=1, unique_id=None):
+        model_path, custom_speaker_name = train_customvoice_family_model(
+            train_jsonl_path=train_jsonl,
+            init_model_path=init_customvoice_model_path,
+            output_dir=output_dir,
+            speaker_name=speaker_name,
+            batch_size=batch_size,
+            lr=lr,
+            num_epochs=num_epochs,
+            speaker_encoder_model_path=base_speaker_encoder_model_path,
+            embed_speaker_encoder=True,
+            unique_id=unique_id,
+        )
+        return (model_path, custom_speaker_name)
+
+
+class Qwen3VoiceBoxFineTune:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "train_jsonl": ("STRING", {"default": "", "multiline": False}),
+                "init_voicebox_model_path": ("STRING", {"default": "", "multiline": False}),
+                "output_dir": ("STRING", {"default": "output/voicebox_retrain_run", "multiline": False}),
+                "speaker_name": ("STRING", {"default": "mai"}),
+            },
+            "optional": {
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 64}),
+                "lr": ("FLOAT", {"default": 2e-6, "step": 1e-7}),
+                "num_epochs": ("INT", {"default": 1, "min": 1, "max": 1000}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("model_path", "custom_speaker_name")
+    FUNCTION = "train"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def train(self, train_jsonl, init_voicebox_model_path, output_dir, speaker_name, batch_size=1, lr=2e-6, num_epochs=1, unique_id=None):
+        if not is_voicebox_checkpoint_dir(Path(init_voicebox_model_path).resolve()):
+            raise ValueError("init_voicebox_model_path must point to a VoiceBox checkpoint with embedded speaker encoder.")
+        model_path, custom_speaker_name = train_customvoice_family_model(
+            train_jsonl_path=train_jsonl,
+            init_model_path=init_voicebox_model_path,
+            output_dir=output_dir,
+            speaker_name=speaker_name,
+            batch_size=batch_size,
+            lr=lr,
+            num_epochs=num_epochs,
+            speaker_encoder_model_path="",
+            embed_speaker_encoder=True,
+            unique_id=unique_id,
+        )
+        return (model_path, custom_speaker_name)
 
 class Qwen3DatasetFromFolder:
     @classmethod

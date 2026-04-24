@@ -3,6 +3,7 @@ from .nodes import (
     Qwen3CustomVoice,
     Qwen3VoiceDesign,
     Qwen3VoiceClone,
+    Qwen3BaseCustomVoiceCloneInstruct,
     Qwen3DirectedCloneFromVoiceDesign,
     Qwen3PromptMaker,
     Qwen3ClonePromptFromAudio,
@@ -12,6 +13,10 @@ from .nodes import (
     Qwen3DatasetFromFolder,
     Qwen3DataPrep,
     Qwen3FineTune,
+    Qwen3PlainCustomVoiceFineTune,
+    Qwen3VoiceBoxCreate,
+    Qwen3VoiceBoxBootstrapFineTune,
+    Qwen3VoiceBoxFineTune,
     Qwen3AudioCompare
 )
 
@@ -20,6 +25,7 @@ NODE_CLASS_MAPPINGS = {
     "Qwen3CustomVoice": Qwen3CustomVoice,
     "Qwen3VoiceDesign": Qwen3VoiceDesign,
     "Qwen3VoiceClone": Qwen3VoiceClone,
+    "Qwen3BaseCustomVoiceCloneInstruct": Qwen3BaseCustomVoiceCloneInstruct,
     "Qwen3DirectedCloneFromVoiceDesign": Qwen3DirectedCloneFromVoiceDesign,
     "Qwen3PromptMaker": Qwen3PromptMaker,
     "Qwen3ClonePromptFromAudio": Qwen3ClonePromptFromAudio,
@@ -29,6 +35,10 @@ NODE_CLASS_MAPPINGS = {
     "Qwen3DatasetFromFolder": Qwen3DatasetFromFolder,
     "Qwen3DataPrep": Qwen3DataPrep,
     "Qwen3FineTune": Qwen3FineTune,
+    "Qwen3PlainCustomVoiceFineTune": Qwen3PlainCustomVoiceFineTune,
+    "Qwen3VoiceBoxCreate": Qwen3VoiceBoxCreate,
+    "Qwen3VoiceBoxBootstrapFineTune": Qwen3VoiceBoxBootstrapFineTune,
+    "Qwen3VoiceBoxFineTune": Qwen3VoiceBoxFineTune,
     "Qwen3AudioCompare": Qwen3AudioCompare
 }
 
@@ -37,6 +47,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Qwen3CustomVoice": "Qwen3-TTS Custom Voice",
     "Qwen3VoiceDesign": "Qwen3-TTS Voice Design",
     "Qwen3VoiceClone": "Qwen3-TTS Voice Clone",
+    "Qwen3BaseCustomVoiceCloneInstruct": "Qwen3-TTS Base+CustomVoice Clone+Instruct",
     "Qwen3DirectedCloneFromVoiceDesign": "Qwen3-TTS Directed Clone From Voice Design",
     "Qwen3PromptMaker": "Qwen3-TTS Prompt Maker",
     "Qwen3ClonePromptFromAudio": "Qwen3-TTS Clone Prompt From Audio",
@@ -46,6 +57,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Qwen3DatasetFromFolder": "Qwen3-TTS Dataset Maker",
     "Qwen3DataPrep": "Qwen3-TTS Data Prep",
     "Qwen3FineTune": "Qwen3-TTS Finetune",
+    "Qwen3PlainCustomVoiceFineTune": "Qwen3-TTS Plain CustomVoice Finetune",
+    "Qwen3VoiceBoxCreate": "Qwen3-TTS VoiceBox Create",
+    "Qwen3VoiceBoxBootstrapFineTune": "Qwen3-TTS VoiceBox Bootstrap Finetune",
+    "Qwen3VoiceBoxFineTune": "Qwen3-TTS VoiceBox Finetune",
     "Qwen3AudioCompare": "Qwen3-TTS Audio Compare"
 }
 
