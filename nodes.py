@@ -27,7 +27,7 @@ try:
 except ImportError:
     HAS_BNB = False
 from torch.utils.data import DataLoader
-from transformers import AutoConfig, AutoModel, AutoProcessor, get_linear_schedule_with_warmup
+from transformers import Adafactor, AutoConfig, AutoModel, AutoProcessor, get_linear_schedule_with_warmup
 from transformers.utils import cached_file
 from safetensors import safe_open
 from safetensors.torch import save_file, load_file
@@ -105,6 +105,12 @@ def resolve_training_output_dir(output_dir: str) -> str:
     return str(output_path)
 
 def resolve_training_attention() -> str:
+    configured = (os.getenv("QWEN_DEMO_ATTN_IMPL") or "").strip()
+    if configured:
+        return configured
+    device = mm.get_torch_device()
+    if device.type == "mps":
+        return "sdpa"
     try:
         import flash_attn  # noqa: F401
         import importlib.metadata
@@ -469,7 +475,7 @@ def train_customvoice_family_model(
     if speaker_encoder_path is not None and not speaker_encoder_path.exists():
         raise ValueError(f"Speaker encoder source not found: {speaker_encoder_path}")
 
-    output_model_path.mkdir(parents=True, exist_ok=True)
+    output_model_path.parent.mkdir(parents=True, exist_ok=True)
     send_progress_text(unique_id, "Loading training model...")
 
     qwen3tts = load_qwen_or_voicebox_model(
@@ -493,17 +499,39 @@ def train_customvoice_family_model(
         if "ref_audio" in row:
             row["ref_audio"] = resolve_jsonl_audio_path(str(row["ref_audio"]), train_jsonl)
 
+    # Canonical VoiceBox training sorts by sequence length to avoid early OOM spikes.
+    train_data.sort(key=lambda row: len(row.get("audio_codes", [])))
     dataset = TTSDataset(train_data, qwen3tts.processor, config)
-    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=dataset.collate_fn)
-    optimizer = AdamW(qwen3tts.model.parameters(), lr=lr, weight_decay=0.01, foreach=False, fused=False)
+    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=dataset.collate_fn)
 
-    accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision=runtime["mixed_precision"])
+    optimizer_name = (os.getenv("QWEN_DEMO_OPTIMIZER") or "adamw").strip().lower()
+    if optimizer_name == "adafactor":
+        optimizer = Adafactor(
+            qwen3tts.model.parameters(),
+            lr=lr,
+            weight_decay=0.01,
+            scale_parameter=False,
+            relative_step=False,
+            warmup_init=False,
+        )
+    else:
+        optimizer_kwargs = {"lr": lr, "weight_decay": 0.01}
+        if runtime["device"].type == "cuda":
+            optimizer_kwargs["fused"] = True
+        optimizer = AdamW(qwen3tts.model.parameters(), **optimizer_kwargs)
+
+    gradient_accumulation_steps = max(1, int(os.getenv("QWEN_DEMO_GRAD_ACCUM_STEPS", "1")))
+    accelerator = Accelerator(
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        mixed_precision=runtime["mixed_precision"],
+    )
     model, optimizer, train_dataloader = accelerator.prepare(qwen3tts.model, optimizer, train_dataloader)
     model.train()
 
     target_speaker_embedding = None
     checkpoint_embeds_encoder = checkpoint_has_speaker_encoder(init_model_dir)
     speaker_source = resolve_speaker_encoder_source(init_model_dir, speaker_encoder_path)
+    log_every = max(1, int(os.getenv("QWEN_DEMO_LOG_EVERY", "10")))
 
     for epoch in range(num_epochs):
         send_progress_text(unique_id, f"Epoch {epoch + 1}/{num_epochs} training...")
@@ -557,7 +585,7 @@ def train_customvoice_family_model(
                 optimizer.step()
                 optimizer.zero_grad()
 
-            if step % 10 == 0:
+            if step % log_every == 0:
                 status = f"Epoch {epoch} | Step {step} | Loss: {loss.item():.4f}"
                 print(status)
                 send_progress_text(unique_id, status)
