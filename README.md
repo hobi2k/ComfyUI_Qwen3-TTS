@@ -26,6 +26,30 @@ Install dependencies:
 pip install qwen-tts soundfile librosa safetensors accelerate
 ```
 
+## Package Layout
+
+The repo is now split so the standalone vendor code is easier to maintain when
+`Qwen3-TTS-Demo` changes:
+
+- `core/`
+  shared ComfyUI paths, cache helpers, audio conversion, progress utilities
+- `inference/voicebox/`
+  vendor mirror of `Qwen3-TTS/inference/voicebox/` for runtime helpers
+- `finetuning/voicebox_training_common.py`
+  vendor mirror of `Qwen3-TTS/finetuning/voicebox_training_common.py`
+- `fusion/make_voicebox_checkpoint.py`
+  vendor mirror of `Qwen3-TTS/fusion/make_voicebox_checkpoint.py`
+- `nodes.py`
+  ComfyUI node classes only, importing shared helpers from `core/`, `inference/`, `finetuning/`, and `fusion/`
+- `finetuning/`
+  upstream-style training backends kept for the older fine-tune node
+- `workflows/`
+  example ComfyUI graphs for clone, prompt reuse, CustomVoice, and VoiceBox flows
+
+The older `voicebox/` package is kept only as a compatibility shim.
+If you need to re-vendor from the demo repo again, follow `Qwen3-TTS/inference`,
+`Qwen3-TTS/finetuning`, and `Qwen3-TTS/fusion`.
+
 ## ComfyUI Nodes
 
 | Node | Description |
