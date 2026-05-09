@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import soundfile as sf
 import numpy as np
+import librosa
 import comfy.model_management as mm
 from server import PromptServer
 from qwen_tts import Qwen3TTSModel, Qwen3TTSTokenizer
@@ -48,6 +49,291 @@ from .inference.voicebox.runtime import (
     is_voicebox_checkpoint_dir,
     load_qwen_or_voicebox_model,
 )
+
+
+def apply_seed(seed: int | None) -> None:
+    if seed is None:
+        return
+    np.random.seed(int(seed))
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
+
+
+def language_anchor_speaker_from_model(model, language: str, requested: str) -> str:
+    speaker_map = dict(getattr(model.model.config.talker_config, "spk_id", {}) or {})
+    by_lower = {str(key).lower(): str(key) for key in speaker_map.keys()}
+    value = (requested or "auto").strip()
+    if value and value.lower() != "auto":
+        if value.lower() not in by_lower:
+            raise ValueError(f"Speaker '{value}' is not in checkpoint speaker map.")
+        return by_lower[value.lower()]
+
+    language_key = (language or "auto").strip().lower()
+    preferred_by_language = {
+        "korean": ["sohee"],
+        "ko": ["sohee"],
+        "japanese": ["ono_anna"],
+        "ja": ["ono_anna"],
+        "english": ["aiden", "ryan", "dylan", "eric"],
+        "en": ["aiden", "ryan", "dylan", "eric"],
+        "chinese": ["vivian", "serena", "uncle_fu"],
+        "zh": ["vivian", "serena", "uncle_fu"],
+        "auto": ["sohee", "ono_anna", "aiden", "vivian", "serena"],
+    }
+    for candidate in preferred_by_language.get(language_key, preferred_by_language["auto"]):
+        if candidate in by_lower:
+            return by_lower[candidate]
+    if not by_lower:
+        raise ValueError("The checkpoint does not expose a speaker map.")
+    return by_lower[sorted(by_lower.keys())[0]]
+
+
+def speaker_token_embedding(model, speaker: str) -> torch.Tensor | None:
+    if not speaker:
+        return None
+    spk_id = getattr(model.model.config.talker_config, "spk_id", {})
+    lowered = {str(key).lower(): value for key, value in spk_id.items()} if isinstance(spk_id, dict) else {}
+    token_id = lowered.get(speaker.lower())
+    if token_id is None:
+        return None
+    token = torch.tensor(token_id, device=model.model.talker.device, dtype=torch.long)
+    return model.model.talker.get_input_embeddings()(token).detach().view(-1).cpu()
+
+
+def anchor_prompt_items_for_instruct(custom_model, prompt_items, language: str, speaker_anchor: str) -> tuple[list, str | None]:
+    if speaker_anchor.strip().lower() == "none":
+        return prompt_items, None
+    if getattr(custom_model.model, "tts_model_type", "") != "custom_voice":
+        return prompt_items, None
+
+    anchor_speaker = speaker_anchor.strip()
+    if not anchor_speaker or anchor_speaker.lower() == "auto":
+        anchor_speaker = language_anchor_speaker_from_model(custom_model, language, anchor_speaker or "auto")
+    anchor_embedding = speaker_token_embedding(custom_model, anchor_speaker)
+    if anchor_embedding is None:
+        if speaker_anchor.strip() and speaker_anchor.strip().lower() != "auto":
+            raise ValueError(f"CustomVoice speaker anchor is not available in this checkpoint: {speaker_anchor}")
+        return prompt_items, None
+
+    anchored_items = []
+    for item in prompt_items:
+        anchored_items.append(
+            item.__class__(
+                ref_code=item.ref_code,
+                ref_spk_embedding=anchor_embedding,
+                x_vector_only_mode=item.x_vector_only_mode,
+                icl_mode=item.icl_mode,
+                ref_text=item.ref_text,
+            )
+        )
+    return anchored_items, anchor_speaker.lower()
+
+
+def get_speaker_embedding(model, speaker: str) -> torch.Tensor:
+    speaker_map = dict(model.model.config.talker_config.spk_id)
+    lowered = {str(key).lower(): value for key, value in speaker_map.items()}
+    spk_id = lowered[speaker.lower()]
+    return model.model.talker.get_input_embeddings()(
+        torch.tensor(spk_id, device=model.model.talker.device, dtype=torch.long)
+    )
+
+
+def encode_reference_audio(model, audio_input) -> torch.Tensor:
+    normalized = model._normalize_audio_inputs([load_audio_input(audio_input)])
+    wav, sr = normalized[0]
+    encoded = model.model.speech_tokenizer.encode(wav, sr=sr)
+    return encoded.audio_codes[0]
+
+
+def pseudo_embedding_from_ref_code(model, ref_code: torch.Tensor) -> torch.Tensor:
+    ref_code = ref_code.detach().clone().to(device=model.model.talker.device, dtype=torch.long)
+    per_group_embeds = []
+    for group_idx in range(model.model.talker.config.num_code_groups):
+        token_ids = ref_code[:, group_idx]
+        if group_idx == 0:
+            emb = model.model.talker.get_input_embeddings()(token_ids)
+        else:
+            emb = model.model.talker.code_predictor.get_input_embeddings()[group_idx - 1](token_ids)
+        per_group_embeds.append(emb)
+    stacked = torch.stack(per_group_embeds, dim=0).mean(dim=0)
+    return stacked.mean(dim=0)
+
+
+def true_embedding_from_audio_input(model, audio_input) -> torch.Tensor | None:
+    if getattr(model.model, "speaker_encoder", None) is None:
+        return None
+    audio_tuple = load_audio_input(audio_input)
+    if audio_tuple is None:
+        return None
+    wav, sr = audio_tuple
+    wav = np.asarray(wav, dtype=np.float32)
+    if wav.ndim > 1:
+        wav = np.mean(wav, axis=0)
+    target_sr = int(model.model.speaker_encoder_sample_rate)
+    if int(sr) != target_sr:
+        wav = librosa.resample(y=wav.astype(np.float32), orig_sr=int(sr), target_sr=target_sr)
+        sr = target_sr
+    return model.model.extract_speaker_embedding(audio=np.asarray(wav, dtype=np.float32), sr=int(sr)).detach().cpu()
+
+
+def cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
+    left = a.detach().float().view(1, -1)
+    right = b.detach().float().to(device=left.device).view(1, -1)
+    return float(torch.nn.functional.cosine_similarity(left, right).item())
+
+
+def manual_voicebox_generate(
+    model,
+    *,
+    text: str,
+    language: str,
+    instruct: str,
+    ref_text: str,
+    ref_code: torch.Tensor,
+    ref_spk_embedding: torch.Tensor,
+    x_vector_only_mode: bool,
+    icl_mode: bool,
+    non_streaming_mode: bool,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+):
+    device = model.model.talker.device
+    dtype = next(model.model.talker.parameters()).dtype
+    ref_code = ref_code.detach().to(device=device, dtype=torch.long)
+    ref_spk_embedding = ref_spk_embedding.detach().to(device=device, dtype=dtype)
+    input_ids = [model._tokenize_texts([model._build_assistant_text(text)])[0]]
+    instruct_ids = [model._tokenize_texts([model._build_instruct_text(instruct)])[0] if instruct else None]
+    ref_ids = [model._tokenize_texts([model._build_ref_text(ref_text)])[0] if ref_text else None]
+    voice_clone_prompt = {
+        "ref_code": [None if x_vector_only_mode else ref_code],
+        "ref_spk_embedding": [ref_spk_embedding],
+        "x_vector_only_mode": [x_vector_only_mode],
+        "icl_mode": [icl_mode],
+    }
+    codes, _ = model.model.generate(
+        input_ids=input_ids,
+        instruct_ids=instruct_ids,
+        ref_ids=ref_ids,
+        voice_clone_prompt=voice_clone_prompt,
+        languages=[language],
+        speakers=[None],
+        non_streaming_mode=non_streaming_mode,
+        **model._merge_generate_kwargs(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        ),
+    )
+    ref_code_list = voice_clone_prompt.get("ref_code", None)
+    codes_for_decode = []
+    for index, code in enumerate(codes):
+        if ref_code_list is not None and ref_code_list[index] is not None:
+            codes_for_decode.append(torch.cat([ref_code_list[index].to(code.device), code], dim=0))
+        else:
+            codes_for_decode.append(code)
+    wavs_all, sample_rate = model.model.speech_tokenizer.decode([{"audio_codes": code} for code in codes_for_decode])
+    final_wav = wavs_all[0]
+    if ref_code_list is not None and ref_code_list[0] is not None:
+        ref_len = int(ref_code_list[0].shape[0])
+        total_len = int(codes_for_decode[0].shape[0])
+        cut = int(ref_len / max(total_len, 1) * final_wav.shape[0])
+        final_wav = final_wav[cut:]
+    return final_wav, sample_rate
+
+
+def run_voicebox_clone_strategy(
+    model,
+    *,
+    text: str,
+    strategy: str,
+    seed: int,
+    ref_audio=None,
+    ref_text: str = "",
+    prompt=None,
+    language: str = "Korean",
+    instruct: str = "",
+    speaker: str = "auto",
+    max_new_tokens: int = 1024,
+    temperature: float = 0.8,
+    top_p: float = 0.95,
+    non_streaming_mode: bool = False,
+):
+    apply_seed(seed)
+    if prompt is None and (ref_audio is None or not ref_text.strip()):
+        raise ValueError("Provide either 'prompt' or both 'ref_audio' and 'ref_text'.")
+
+    lang = language if language != "Auto" else "Korean"
+    resolved_speaker = language_anchor_speaker_from_model(model, lang, speaker)
+    prompt_item = prompt[0] if prompt else None
+    if prompt_item is not None and prompt_item.ref_code is not None:
+        ref_code = prompt_item.ref_code
+    else:
+        ref_code = encode_reference_audio(model, ref_audio)
+    if prompt_item is not None and prompt_item.ref_text:
+        ref_text = prompt_item.ref_text
+
+    speaker_embed = get_speaker_embedding(model, resolved_speaker)
+    pseudo_embed = pseudo_embedding_from_ref_code(model, ref_code)
+    embedded_encoder_embed = prompt_item.ref_spk_embedding if prompt_item is not None else true_embedding_from_audio_input(model, ref_audio)
+
+    embed = None
+    xvec_only = False
+    icl_mode = True
+    if strategy == "control_stock_customvoice":
+        wavs, sr = model.generate_custom_voice(
+            text=text,
+            speaker=resolved_speaker,
+            language=lang,
+            instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
+            **model._merge_generate_kwargs(max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p),
+        )
+        summary = {
+            "strategy": strategy,
+            "speaker": resolved_speaker,
+            "x_vector_only_mode": False,
+            "icl_mode": False,
+            "ok": True,
+        }
+        return convert_audio(wavs[0], sr), summary
+    if strategy == "embedded_encoder_only":
+        embed, xvec_only, icl_mode = embedded_encoder_embed, True, False
+    elif strategy == "embedded_encoder_with_ref_code":
+        embed = embedded_encoder_embed
+    elif strategy in {"speaker_anchor_with_ref_code", "morphed_speaker_with_ref_code", "borrowed_stock_embed_with_ref_code"}:
+        embed = speaker_embed
+    elif strategy == "pseudo_embed_only":
+        embed, xvec_only, icl_mode = pseudo_embed, True, False
+    elif strategy == "pseudo_embed_with_ref_code":
+        embed = pseudo_embed
+
+    if embed is None:
+        raise ValueError(f"Strategy '{strategy}' requires an embedded speaker encoder or prompt embedding.")
+    wav, sr = manual_voicebox_generate(
+        model,
+        text=text,
+        language=lang,
+        instruct=instruct,
+        ref_text=ref_text,
+        ref_code=ref_code,
+        ref_spk_embedding=embed,
+        x_vector_only_mode=xvec_only,
+        icl_mode=icl_mode,
+        non_streaming_mode=non_streaming_mode,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    summary = {
+        "strategy": strategy,
+        "speaker": resolved_speaker,
+        "x_vector_only_mode": xvec_only,
+        "icl_mode": icl_mode,
+        "similarity_to_speaker": cosine_similarity(embed, speaker_embed),
+    }
+    return convert_audio(wav, sr), summary
 
 class Qwen3Loader:
     @classmethod
@@ -1130,6 +1416,486 @@ class Qwen3BaseCustomVoiceCloneInstruct:
         return (prompt_items, convert_audio(final_wav, sample_rate))
 
 
+class Qwen3HybridCloneInstructPreset:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "base_model": ("QWEN3_MODEL",),
+                "custom_voice_model": ("QWEN3_MODEL",),
+                "text": ("STRING", {"multiline": True}),
+                "seed": ("INT", {"default": 42, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "ref_audio": ("AUDIO",),
+                "ref_text": ("STRING", {"multiline": True, "default": ""}),
+                "prompt": ("QWEN3_PROMPT",),
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Korean"}),
+                "instruct": ("STRING", {"multiline": True, "default": ""}),
+                "speaker_anchor": ("STRING", {"default": "auto"}),
+                "customvoice_speaker": ("STRING", {"default": ""}),
+                "x_vector_only_mode": ("BOOLEAN", {"default": False}),
+                "max_new_tokens": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 64}),
+                "temperature": ("FLOAT", {"default": 0.8, "min": 0.1, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "non_streaming_mode": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("QWEN3_PROMPT", "AUDIO", "STRING", "STRING")
+    RETURN_NAMES = ("clone_prompt", "audio", "strategy", "anchor_speaker")
+    FUNCTION = "generate"
+    CATEGORY = "Qwen3-TTS"
+
+    def generate(
+        self,
+        base_model,
+        custom_voice_model,
+        text,
+        seed,
+        ref_audio=None,
+        ref_text="",
+        prompt=None,
+        language="Korean",
+        instruct="",
+        speaker_anchor="auto",
+        customvoice_speaker="",
+        x_vector_only_mode=False,
+        max_new_tokens=1024,
+        temperature=0.8,
+        top_p=0.95,
+        non_streaming_mode=False,
+    ):
+        apply_seed(seed)
+        if getattr(base_model.model, "tts_model_type", None) != "base":
+            raise ValueError("Model Type Error: 'base_model' must be a Base model.")
+        if getattr(custom_voice_model.model, "tts_model_type", None) != "custom_voice":
+            raise ValueError("Model Type Error: 'custom_voice_model' must be a CustomVoice model.")
+        if prompt is None and (ref_audio is None or not ref_text.strip()):
+            raise ValueError("Provide either 'prompt' or both 'ref_audio' and 'ref_text'.")
+
+        lang = language if language != "Auto" else "Korean"
+        anchor_value = customvoice_speaker.strip() or speaker_anchor
+        prompt_items = prompt
+        if prompt_items is None:
+            prompt_items = base_model.create_voice_clone_prompt(
+                ref_audio=load_audio_input(ref_audio),
+                ref_text=ref_text,
+                x_vector_only_mode=x_vector_only_mode,
+            )
+
+        prompt_items_for_generation, anchor_speaker = anchor_prompt_items_for_instruct(
+            custom_voice_model,
+            prompt_items,
+            lang,
+            anchor_value,
+        )
+        voice_clone_prompt = custom_voice_model._prompt_items_to_voice_clone_prompt(prompt_items_for_generation)
+        ref_ids = []
+        for item in prompt_items:
+            if item.ref_text:
+                ref_ids.append(custom_voice_model._tokenize_texts([custom_voice_model._build_ref_text(item.ref_text)])[0])
+            else:
+                ref_ids.append(None)
+
+        input_ids = custom_voice_model._tokenize_texts([custom_voice_model._build_assistant_text(text)])
+        instruct_ids = [
+            custom_voice_model._tokenize_texts([custom_voice_model._build_instruct_text(instruct)])[0]
+            if instruct.strip()
+            else None
+        ]
+        talker_codes_list, _ = custom_voice_model.model.generate(
+            input_ids=input_ids,
+            instruct_ids=instruct_ids,
+            ref_ids=ref_ids,
+            voice_clone_prompt=voice_clone_prompt,
+            languages=[lang],
+            speakers=[None],
+            non_streaming_mode=non_streaming_mode,
+            **custom_voice_model._merge_generate_kwargs(
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            ),
+        )
+
+        ref_code_list = voice_clone_prompt.get("ref_code", None)
+        codes_for_decode = []
+        for index, codes in enumerate(talker_codes_list):
+            if ref_code_list is not None and ref_code_list[index] is not None:
+                codes_for_decode.append(torch.cat([ref_code_list[index].to(codes.device), codes], dim=0))
+            else:
+                codes_for_decode.append(codes)
+        wavs_all, sample_rate = custom_voice_model.model.speech_tokenizer.decode(
+            [{"audio_codes": codes} for codes in codes_for_decode]
+        )
+        wav = wavs_all[0]
+        if ref_code_list is not None and ref_code_list[0] is not None:
+            ref_len = int(ref_code_list[0].shape[0])
+            total_len = int(codes_for_decode[0].shape[0])
+            cut = int(ref_len / max(total_len, 1) * wav.shape[0])
+            wav = wav[cut:]
+        strategy = "customvoice_speaker_anchor_with_ref_code" if anchor_speaker else "embedded_encoder_with_ref_code"
+        return (prompt_items, convert_audio(wav, sample_rate), strategy, anchor_speaker or "")
+
+
+class Qwen3VoiceBoxInstruct:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("QWEN3_MODEL",),
+                "speaker": ("STRING", {"default": "mai"}),
+                "text": ("STRING", {"multiline": True}),
+                "seed": ("INT", {"default": 42, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Korean"}),
+                "instruct": ("STRING", {"multiline": True, "default": ""}),
+                "max_new_tokens": ("INT", {"default": 2048, "min": 64, "max": 8192, "step": 64}),
+                "temperature": ("FLOAT", {"default": 0.9, "min": 0.1, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05}),
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "generate"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def generate(self, model, speaker, text, seed, language="Korean", instruct="", max_new_tokens=2048, temperature=0.9, top_p=0.9):
+        apply_seed(seed)
+        wavs, sr = model.generate_custom_voice(
+            text=text,
+            speaker=speaker,
+            language=None if language == "Auto" else language,
+            instruct=instruct or None,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        return (convert_audio(wavs[0], sr),)
+
+
+class Qwen3VoiceBoxCloneExperiment:
+    STRATEGIES = [
+        "control_stock_customvoice",
+        "embedded_encoder_only",
+        "embedded_encoder_with_ref_code",
+        "speaker_anchor_with_ref_code",
+        "morphed_speaker_with_ref_code",
+        "borrowed_stock_embed_with_ref_code",
+        "pseudo_embed_only",
+        "pseudo_embed_with_ref_code",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("QWEN3_MODEL",),
+                "text": ("STRING", {"multiline": True}),
+                "strategy": (s.STRATEGIES, {"default": "embedded_encoder_with_ref_code"}),
+                "seed": ("INT", {"default": 42, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "ref_audio": ("AUDIO",),
+                "ref_text": ("STRING", {"multiline": True, "default": ""}),
+                "prompt": ("QWEN3_PROMPT",),
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Korean"}),
+                "instruct": ("STRING", {"multiline": True, "default": "Speak softly, with restrained exhaustion but clear diction."}),
+                "speaker": ("STRING", {"default": "auto"}),
+                "max_new_tokens": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 64}),
+                "temperature": ("FLOAT", {"default": 0.8, "min": 0.1, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "non_streaming_mode": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO", "STRING")
+    RETURN_NAMES = ("audio", "summary")
+    FUNCTION = "generate"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def generate(
+        self,
+        model,
+        text,
+        strategy,
+        seed,
+        ref_audio=None,
+        ref_text="",
+        prompt=None,
+        language="Korean",
+        instruct="Speak softly, with restrained exhaustion but clear diction.",
+        speaker="auto",
+        max_new_tokens=1024,
+        temperature=0.8,
+        top_p=0.95,
+        non_streaming_mode=False,
+    ):
+        audio, summary = run_voicebox_clone_strategy(
+            model,
+            text=text,
+            strategy=strategy,
+            seed=seed,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            prompt=prompt,
+            language=language,
+            instruct=instruct,
+            speaker=speaker,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            non_streaming_mode=non_streaming_mode,
+        )
+        return (audio, json.dumps(summary, ensure_ascii=False))
+
+
+class Qwen3VoiceBoxClone:
+    STRATEGIES = [
+        "embedded_encoder_only",
+        "embedded_encoder_with_ref_code",
+        "speaker_anchor_with_ref_code",
+        "morphed_speaker_with_ref_code",
+        "borrowed_stock_embed_with_ref_code",
+        "pseudo_embed_only",
+        "pseudo_embed_with_ref_code",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("QWEN3_MODEL",),
+                "text": ("STRING", {"multiline": True}),
+                "seed": ("INT", {"default": 42, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "ref_audio": ("AUDIO",),
+                "ref_text": ("STRING", {"multiline": True, "default": ""}),
+                "prompt": ("QWEN3_PROMPT",),
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Korean"}),
+                "speaker": ("STRING", {"default": "auto"}),
+                "strategy": (s.STRATEGIES, {"default": "embedded_encoder_with_ref_code"}),
+                "max_new_tokens": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 64}),
+                "temperature": ("FLOAT", {"default": 0.8, "min": 0.1, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "non_streaming_mode": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO", "STRING")
+    RETURN_NAMES = ("audio", "summary")
+    FUNCTION = "generate"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def generate(self, model, text, seed, ref_audio=None, ref_text="", prompt=None, language="Korean", speaker="auto", strategy="embedded_encoder_with_ref_code", max_new_tokens=1024, temperature=0.8, top_p=0.95, non_streaming_mode=False):
+        audio, summary = run_voicebox_clone_strategy(
+            model,
+            text=text,
+            strategy=strategy,
+            seed=seed,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            prompt=prompt,
+            language=language,
+            instruct="",
+            speaker=speaker,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            non_streaming_mode=non_streaming_mode,
+        )
+        return (audio, json.dumps(summary, ensure_ascii=False))
+
+
+class Qwen3VoiceBoxCloneInstruct:
+    STRATEGIES = Qwen3VoiceBoxClone.STRATEGIES + ["control_stock_customvoice"]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("QWEN3_MODEL",),
+                "text": ("STRING", {"multiline": True}),
+                "instruct": ("STRING", {"multiline": True, "default": "Speak softly, with restrained exhaustion but clear diction."}),
+                "seed": ("INT", {"default": 42, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "ref_audio": ("AUDIO",),
+                "ref_text": ("STRING", {"multiline": True, "default": ""}),
+                "prompt": ("QWEN3_PROMPT",),
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Korean"}),
+                "speaker": ("STRING", {"default": "auto"}),
+                "strategy": (s.STRATEGIES, {"default": "embedded_encoder_with_ref_code"}),
+                "max_new_tokens": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 64}),
+                "temperature": ("FLOAT", {"default": 0.8, "min": 0.1, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "non_streaming_mode": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO", "STRING")
+    RETURN_NAMES = ("audio", "summary")
+    FUNCTION = "generate"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def generate(self, model, text, instruct, seed, ref_audio=None, ref_text="", prompt=None, language="Korean", speaker="auto", strategy="embedded_encoder_with_ref_code", max_new_tokens=1024, temperature=0.8, top_p=0.95, non_streaming_mode=False):
+        audio, summary = run_voicebox_clone_strategy(
+            model,
+            text=text,
+            strategy=strategy,
+            seed=seed,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            prompt=prompt,
+            language=language,
+            instruct=instruct,
+            speaker=speaker,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            non_streaming_mode=non_streaming_mode,
+        )
+        return (audio, json.dumps(summary, ensure_ascii=False))
+
+
+class Qwen3VoiceBoxMorphSpeaker:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model_path": ("STRING", {"default": "", "multiline": False}),
+                "target_speaker": ("STRING", {"default": "morphed_speaker"}),
+            },
+            "optional": {
+                "output_model_path": ("STRING", {"default": "", "multiline": False}),
+                "update_in_place": ("BOOLEAN", {"default": False}),
+                "language": ([
+                    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
+                    "French", "Russian", "Portuguese", "Spanish", "Italian"
+                ], {"default": "Korean"}),
+                "anchor_speaker": ("STRING", {"default": "auto"}),
+                "ref_audio": ("AUDIO",),
+                "prompt": ("QWEN3_PROMPT",),
+                "timbre_strength": ("FLOAT", {"default": 0.72, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "preserve_norm": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("model_path", "speaker_name", "metadata")
+    FUNCTION = "create"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def create(
+        self,
+        model_path,
+        target_speaker,
+        output_model_path="",
+        update_in_place=False,
+        language="Korean",
+        anchor_speaker="auto",
+        ref_audio=None,
+        prompt=None,
+        timbre_strength=0.72,
+        preserve_norm=True,
+    ):
+        source_path = Path(model_path).resolve()
+        if not source_path.exists():
+            raise ValueError(f"Model path not found: {source_path}")
+        if prompt is None and ref_audio is None:
+            raise ValueError("Provide either 'prompt' or 'ref_audio'.")
+
+        model = load_qwen_or_voicebox_model(
+            str(source_path),
+            device_map="cuda:0" if torch.cuda.is_available() else "cpu",
+            dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            attn_implementation="sdpa",
+        )
+        config_path = source_path / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        state_dict = load_file(str(source_path / "model.safetensors"))
+        weight_key = "talker.model.codec_embedding.weight"
+        if weight_key not in state_dict:
+            raise ValueError(f"Missing speaker embedding weight: {weight_key}")
+
+        anchor_name = language_anchor_speaker_from_model(model, language if language != "Auto" else "Korean", anchor_speaker)
+        anchor_id = dict(model.model.config.talker_config.spk_id)[anchor_name]
+        speaker_weight = state_dict[weight_key]
+        used = {int(value) for value in dict((config.get("talker_config", {}) or {}).get("spk_id", {}) or {}).values()}
+        target_id = max(used) + 1 if used else 0
+        if target_id >= int(speaker_weight.shape[0]):
+            raise ValueError("No unused speaker embedding row is available in this checkpoint.")
+        anchor = speaker_weight[anchor_id].detach().float().cpu().view(-1)
+        if prompt is not None:
+            reference = prompt[0].ref_spk_embedding.detach().float().cpu().view(-1)
+            reference_source = "prompt"
+        else:
+            reference = true_embedding_from_audio_input(model, ref_audio)
+            if reference is None:
+                raise ValueError("This checkpoint does not include a speaker_encoder; use a prompt instead.")
+            reference = reference.detach().float().cpu().view(-1)
+            reference_source = "ref_audio"
+        strength = max(0.0, min(1.0, float(timbre_strength)))
+        morphed = torch.lerp(anchor, reference, strength)
+        if preserve_norm:
+            norm = torch.lerp(anchor.norm(), reference.norm(), strength)
+            morphed = torch.nn.functional.normalize(morphed, dim=0) * norm
+
+        target_path = source_path if update_in_place else Path(output_model_path).resolve()
+        if not update_in_place:
+            if not output_model_path.strip():
+                raise ValueError("'output_model_path' is required unless 'update_in_place' is true.")
+            if target_path.exists():
+                shutil.rmtree(target_path)
+            shutil.copytree(source_path, target_path)
+
+        next_state = {key: value.detach().cpu() for key, value in state_dict.items()}
+        next_state[weight_key][target_id] = morphed.to(next_state[weight_key].dtype)
+        talker_config = dict(config.get("talker_config", {}) or {})
+        spk_id = dict(talker_config.get("spk_id", {}) or {})
+        spk_is_dialect = dict(talker_config.get("spk_is_dialect", {}) or {})
+        spk_id[target_speaker] = int(target_id)
+        spk_is_dialect[target_speaker] = False
+        talker_config["spk_id"] = spk_id
+        talker_config["spk_is_dialect"] = spk_is_dialect
+        config["talker_config"] = talker_config
+        config["tts_model_type"] = "custom_voice"
+        config["demo_model_family"] = "voicebox"
+        config["voicebox_morph"] = {
+            "feature": "voicebox_speaker_morph",
+            "anchor_speaker": anchor_name,
+            "target_speaker": target_speaker,
+            "target_speaker_id": int(target_id),
+            "reference_source": reference_source,
+            "timbre_strength": strength,
+            "preserve_norm": bool(preserve_norm),
+            "cosine_to_anchor": cosine_similarity(morphed, anchor),
+            "cosine_to_reference": cosine_similarity(morphed, reference),
+        }
+        save_file(next_state, str(target_path / "model.safetensors"))
+        (target_path / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        metadata = json.dumps(config["voicebox_morph"], ensure_ascii=False)
+        return (str(target_path), target_speaker, metadata)
+
+
 class Qwen3PlainCustomVoiceFineTune:
     @classmethod
     def INPUT_TYPES(s):
@@ -1200,6 +1966,59 @@ class Qwen3VoiceBoxCreate:
                 output_checkpoint=output_checkpoint,
             ),
         )
+
+
+class Qwen3UploadVoiceBoxToHub:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "checkpoint": ("STRING", {"default": "", "multiline": False}),
+                "repo_id": ("STRING", {"default": "", "multiline": False}),
+            },
+            "optional": {
+                "private": ("BOOLEAN", {"default": True}),
+                "message": ("STRING", {"default": "Upload VoiceBox checkpoint", "multiline": False}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("repo_url",)
+    FUNCTION = "upload"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def upload(self, checkpoint, repo_id, private=True, message="Upload VoiceBox checkpoint", unique_id=None):
+        checkpoint_path = Path(checkpoint).resolve()
+        if not checkpoint_path.exists():
+            raise ValueError(f"Checkpoint not found: {checkpoint_path}")
+        if not checkpoint_path.is_dir():
+            raise ValueError(f"Checkpoint must be a directory: {checkpoint_path}")
+        if not (checkpoint_path / "config.json").exists():
+            raise ValueError(f"Checkpoint is missing config.json: {checkpoint_path}")
+
+        send_progress_text(unique_id, "Checking Hugging Face token...")
+        from huggingface_hub import HfApi, HfFolder, create_repo
+
+        token = HfFolder.get_token()
+        if not token:
+            raise ValueError("No Hugging Face token was found. Set HF_TOKEN or run `huggingface-cli login` before uploading.")
+
+        send_progress_text(unique_id, f"Creating or updating repo {repo_id}...")
+        api = HfApi(token=token)
+        create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True, token=token)
+        send_progress_text(unique_id, "Uploading VoiceBox checkpoint folder...")
+        api.upload_folder(
+            repo_id=repo_id,
+            repo_type="model",
+            folder_path=str(checkpoint_path),
+            commit_message=message,
+        )
+        url = f"https://huggingface.co/{repo_id}"
+        send_progress_text(unique_id, f"Upload complete: {url}")
+        return (url,)
 
 
 class Qwen3VoiceBoxBootstrapFineTune:
@@ -1285,6 +2104,62 @@ class Qwen3VoiceBoxFineTune:
             unique_id=unique_id,
         )
         return (model_path, custom_speaker_name)
+
+
+class Qwen3SFTBase12Hz:
+    @classmethod
+    def INPUT_TYPES(s):
+        return Qwen3FineTune.INPUT_TYPES()
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("model_path", "custom_speaker_name")
+    FUNCTION = "train"
+    CATEGORY = "Qwen3-TTS/FineTuning"
+
+    def train(self, *args, **kwargs):
+        return Qwen3FineTune().train(*args, **kwargs)
+
+
+class Qwen3SFTCustomVoice12Hz:
+    @classmethod
+    def INPUT_TYPES(s):
+        return Qwen3PlainCustomVoiceFineTune.INPUT_TYPES()
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("model_path", "custom_speaker_name")
+    FUNCTION = "train"
+    CATEGORY = "Qwen3-TTS/FineTuning"
+
+    def train(self, *args, **kwargs):
+        return Qwen3PlainCustomVoiceFineTune().train(*args, **kwargs)
+
+
+class Qwen3SFTVoiceBox12Hz:
+    @classmethod
+    def INPUT_TYPES(s):
+        return Qwen3VoiceBoxFineTune.INPUT_TYPES()
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("model_path", "custom_speaker_name")
+    FUNCTION = "train"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def train(self, *args, **kwargs):
+        return Qwen3VoiceBoxFineTune().train(*args, **kwargs)
+
+
+class Qwen3SFTVoiceBoxBootstrap12Hz:
+    @classmethod
+    def INPUT_TYPES(s):
+        return Qwen3VoiceBoxBootstrapFineTune.INPUT_TYPES()
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("voicebox_model_path", "custom_speaker_name")
+    FUNCTION = "train"
+    CATEGORY = "Qwen3-TTS/VoiceBox"
+
+    def train(self, *args, **kwargs):
+        return Qwen3VoiceBoxBootstrapFineTune().train(*args, **kwargs)
 
 class Qwen3DatasetFromFolder:
     @classmethod

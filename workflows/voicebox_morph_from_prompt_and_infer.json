@@ -1,0 +1,112 @@
+{
+  "1": {
+    "_meta": {
+      "title": "Base Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/models/Qwen3-TTS-12Hz-1.7B-Base"
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Load Reference Audio"
+    },
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/e2e/live_input_12s.wav"
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Clone Prompt From Audio"
+    },
+    "class_type": "Qwen3ClonePromptFromAudio",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "ref_audio": [
+        "2",
+        0
+      ],
+      "ref_text": "짧은 기준 음성입니다.",
+      "ref_audio_max_seconds": 12.0,
+      "x_vector_only_mode": false
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "VoiceBox Morph Speaker"
+    },
+    "class_type": "Qwen3VoiceBoxMorphSpeaker",
+    "inputs": {
+      "model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_voicebox17b_full/final",
+      "target_speaker": "morph_from_prompt",
+      "output_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/comfyui_morph_from_prompt/final",
+      "update_in_place": false,
+      "language": "Korean",
+      "anchor_speaker": "auto",
+      "prompt": [
+        "3",
+        0
+      ],
+      "timbre_strength": 0.72,
+      "preserve_norm": true
+    }
+  },
+  "5": {
+    "_meta": {
+      "title": "Morphed VoiceBox Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": [
+        "4",
+        0
+      ]
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Morphed VoiceBox Instruct"
+    },
+    "class_type": "Qwen3VoiceBoxInstruct",
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "speaker": "morph_from_prompt",
+      "text": "이건 프롬프트 기반으로 만든 모프 화자 예시입니다.",
+      "seed": 46,
+      "language": "Korean",
+      "instruct": "차분하고 또렷하게 읽어줘.",
+      "max_new_tokens": 512,
+      "temperature": 0.8,
+      "top_p": 0.9
+    }
+  },
+  "7": {
+    "_meta": {
+      "title": "Save Morphed Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "6",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/voicebox_morph_from_prompt_infer"
+    }
+  }
+}

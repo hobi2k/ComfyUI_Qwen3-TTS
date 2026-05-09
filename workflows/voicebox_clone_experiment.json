@@ -1,0 +1,95 @@
+{
+  "1": {
+    "_meta": {
+      "title": "VoiceBox Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_voicebox17b_full/final"
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Base Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/models/Qwen3-TTS-12Hz-1.7B-Base"
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Load Reference Audio"
+    },
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/e2e/live_input_12s.wav"
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Clone Prompt From Audio"
+    },
+    "class_type": "Qwen3ClonePromptFromAudio",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "ref_audio": [
+        "3",
+        0
+      ],
+      "ref_text": "짧은 기준 음성입니다.",
+      "ref_audio_max_seconds": 12.0,
+      "x_vector_only_mode": false
+    }
+  },
+  "5": {
+    "_meta": {
+      "title": "VoiceBox Clone Experiment"
+    },
+    "class_type": "Qwen3VoiceBoxCloneExperiment",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "text": "이건 보이스박스 클론 실험 경로 예시입니다.",
+      "strategy": "embedded_encoder_with_ref_code",
+      "seed": 44,
+      "prompt": [
+        "4",
+        0
+      ],
+      "language": "Korean",
+      "instruct": "차분하고 또렷하게 읽어줘.",
+      "speaker": "auto",
+      "max_new_tokens": 512,
+      "temperature": 0.8,
+      "top_p": 0.95,
+      "non_streaming_mode": true
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Save Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "5",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/voicebox_clone_experiment"
+    }
+  }
+}

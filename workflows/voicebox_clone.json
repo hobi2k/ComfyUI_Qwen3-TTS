@@ -1,0 +1,63 @@
+{
+  "1": {
+    "_meta": {
+      "title": "VoiceBox Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_voicebox17b_full/final"
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Load Reference Audio"
+    },
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/e2e/live_input_12s.wav"
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "VoiceBox Clone"
+    },
+    "class_type": "Qwen3VoiceBoxClone",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "text": "이건 VoiceBox clone 전용 노드 예시입니다.",
+      "seed": 47,
+      "ref_audio": [
+        "2",
+        0
+      ],
+      "ref_text": "짧은 기준 음성입니다.",
+      "language": "Korean",
+      "speaker": "auto",
+      "strategy": "embedded_encoder_with_ref_code",
+      "max_new_tokens": 512,
+      "temperature": 0.8,
+      "top_p": 0.95,
+      "non_streaming_mode": true
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Save Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "3",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/voicebox_clone"
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "1": {
+    "_meta": {
+      "title": "VoiceBox Morph Speaker"
+    },
+    "class_type": "Qwen3VoiceBoxMorphSpeaker",
+    "inputs": {
+      "model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_voicebox17b_full/final",
+      "target_speaker": "morph_test",
+      "output_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/comfyui_morph_test/final",
+      "update_in_place": false,
+      "language": "Korean",
+      "anchor_speaker": "auto",
+      "timbre_strength": 0.72,
+      "preserve_norm": true
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Morphed VoiceBox Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": [
+        "1",
+        0
+      ]
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Morphed VoiceBox Instruct"
+    },
+    "class_type": "Qwen3VoiceBoxInstruct",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "speaker": "morph_test",
+      "text": "이건 모프된 화자 예시입니다.",
+      "seed": 45,
+      "language": "Korean",
+      "instruct": "낮고 차분하며 안정적으로 읽어줘.",
+      "max_new_tokens": 512,
+      "temperature": 0.8,
+      "top_p": 0.9
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Save Morphed Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "3",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/voicebox_morph_infer"
+    }
+  }
+}

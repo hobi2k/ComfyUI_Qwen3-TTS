@@ -1,0 +1,17 @@
+{
+  "1": {
+    "_meta": {
+      "title": "SFT VoiceBox 12Hz"
+    },
+    "class_type": "Qwen3SFTVoiceBox12Hz",
+    "inputs": {
+      "train_jsonl": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/train/prepared_train.jsonl",
+      "init_voicebox_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_voicebox17b_full/final",
+      "output_dir": "output/sft_voicebox_12hz",
+      "speaker_name": "mai",
+      "batch_size": 1,
+      "lr": 2e-06,
+      "num_epochs": 1
+    }
+  }
+}

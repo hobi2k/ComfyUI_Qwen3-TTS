@@ -1,0 +1,95 @@
+{
+  "1": {
+    "_meta": {
+      "title": "Base Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/models/Qwen3-TTS-12Hz-1.7B-Base"
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "CustomVoice Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_customvoice17b_full/final"
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Load Reference Audio"
+    },
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/e2e/live_input_12s.wav"
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Hybrid Clone Instruct Preset"
+    },
+    "class_type": "Qwen3HybridCloneInstructPreset",
+    "inputs": {
+      "base_model": [
+        "1",
+        0
+      ],
+      "custom_voice_model": [
+        "2",
+        0
+      ],
+      "text": "프리셋 말투 검증입니다. 같은 목소리를 유지하면서도 지친 듯 차분하게 말해볼게요.",
+      "seed": 42,
+      "ref_audio": [
+        "3",
+        0
+      ],
+      "ref_text": "짧은 기준 음성입니다.",
+      "language": "Korean",
+      "instruct": "숨을 고르며 지친 듯하지만 또렷하고 차분하게 읽어줘.",
+      "speaker_anchor": "auto",
+      "customvoice_speaker": "",
+      "x_vector_only_mode": false,
+      "max_new_tokens": 512,
+      "temperature": 0.8,
+      "top_p": 0.95,
+      "non_streaming_mode": true
+    }
+  },
+  "5": {
+    "_meta": {
+      "title": "Save Prompt"
+    },
+    "class_type": "Qwen3SavePrompt",
+    "inputs": {
+      "prompt": [
+        "4",
+        0
+      ],
+      "filename": "hybrid_clone_instruct_preset_prompt"
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Save Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "4",
+        1
+      ],
+      "filename_prefix": "qwen3_tts/hybrid_clone_instruct_preset"
+    }
+  }
+}

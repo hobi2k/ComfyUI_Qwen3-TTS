@@ -1,0 +1,19 @@
+{
+  "1": {
+    "_meta": {
+      "title": "SFT Base 12Hz"
+    },
+    "class_type": "Qwen3SFTBase12Hz",
+    "inputs": {
+      "train_jsonl": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/train/prepared_train.jsonl",
+      "init_model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "output_dir": "output/sft_base_12hz",
+      "epochs": 1,
+      "batch_size": 1,
+      "lr": 2e-06,
+      "speaker_name": "mai",
+      "seed": 42
+    }
+  }
+}

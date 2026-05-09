@@ -1,0 +1,48 @@
+{
+  "1": {
+    "_meta": {
+      "title": "VoiceBox Loader"
+    },
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_voicebox17b_full/final"
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "VoiceBox Instruct"
+    },
+    "class_type": "Qwen3VoiceBoxInstruct",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "speaker": "mai",
+      "text": "지금은 보이스박스 지시형 추론 예시를 실행하고 있어요.",
+      "seed": 43,
+      "language": "Korean",
+      "instruct": "차분하고 또렷하며 살짝 지친 느낌으로 읽어줘.",
+      "max_new_tokens": 512,
+      "temperature": 0.8,
+      "top_p": 0.9
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Save Audio"
+    },
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "2",
+        0
+      ],
+      "filename_prefix": "qwen3_tts/voicebox_instruct"
+    }
+  }
+}

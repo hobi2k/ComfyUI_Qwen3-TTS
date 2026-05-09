@@ -62,16 +62,68 @@ If you need to re-vendor from the demo repo again, follow `Qwen3-TTS/inference`,
 | Qwen3-TTS Clone Prompt From Audio | Create a clone prompt from any audio source, including VoiceDesign output |
 | Qwen3-TTS Custom Voice From Prompt | Generate consistent CustomVoice speech from clone prompt + instruct |
 | Qwen3-TTS Directed Clone From Voice Design | Hybrid node: VoiceDesign audio -> Base clone prompt -> CustomVoice clone + instruct |
+| Qwen3-TTS Hybrid Clone+Instruct Preset | Hybrid preset path with CustomVoice speaker anchor, matching the demo extension flow |
 | Qwen3-TTS Prompt Maker | Create reusable voice clone prompt from reference audio |
 | Qwen3-TTS Save/Load Prompt | Persist voice clone prompts to disk |
+| Qwen3-TTS VoiceBox Instruct | Run regular VoiceBox `speaker + instruct` inference |
+| Qwen3-TTS VoiceBox Clone | Dedicated VoiceBox clone node mapped to the upstream clone entrypoint |
+| Qwen3-TTS VoiceBox Clone+Instruct | Dedicated VoiceBox clone+instruct node mapped to the upstream clone_instruct entrypoint |
+| Qwen3-TTS VoiceBox Clone Experiment | Run low-level VoiceBox clone / clone+instruct strategies |
+| Qwen3-TTS VoiceBox Morph Speaker | Create a persistent morphed speaker row inside a VoiceBox checkpoint |
 | Qwen3-TTS Dataset Maker | Build fine-tuning dataset from an audio folder |
 | Qwen3-TTS Data Prep | Tokenize dataset for fine-tuning |
 | Qwen3-TTS Finetune | Fine-tune node (use sft_12hz_v4 backend for instruct-aware training) |
+| Qwen3-TTS SFT Base 12Hz | Upstream-style Base SFT node alias |
 | Qwen3-TTS Plain CustomVoice Finetune | Standalone plain CustomVoice fine-tuning copied from the demo flow |
+| Qwen3-TTS SFT CustomVoice 12Hz | Upstream-style CustomVoice SFT node alias |
 | Qwen3-TTS VoiceBox Create | Convert a plain CustomVoice checkpoint into a self-contained VoiceBox checkpoint |
+| Qwen3-TTS Upload VoiceBox To Hub | Upload a VoiceBox checkpoint folder to Hugging Face Hub |
 | Qwen3-TTS VoiceBox Bootstrap Finetune | Train a VoiceBox checkpoint directly from CustomVoice + Base speaker encoder |
+| Qwen3-TTS SFT VoiceBox Bootstrap 12Hz | Upstream-style VoiceBox bootstrap SFT node alias |
 | Qwen3-TTS VoiceBox Finetune | Run `VoiceBox -> VoiceBox` fine-tuning on an existing VoiceBox checkpoint |
+| Qwen3-TTS SFT VoiceBox 12Hz | Upstream-style VoiceBox SFT node alias |
 | Qwen3-TTS Audio Compare | Compare two audio outputs |
+
+## Example Workflows
+
+- `voice_design_to_prompt_to_customvoice.json`
+  VoiceDesign -> clone prompt extraction -> CustomVoice generate
+- `customvoice_from_saved_prompt.json`
+  Reuse a previously saved prompt with `Qwen3LoadPrompt`
+- `compare_x_vector_only_mode.json`
+  Compare `x_vector_only_mode=true/false` with the same reference
+- `base_customvoice_clone_instruct.json`
+  Demo-style Base + CustomVoice clone+instruct chain
+- `plain_customvoice_finetune_and_voicebox_create.json`
+  Plain CustomVoice fine-tune followed by VoiceBox checkpoint fusion
+- `voicebox_bootstrap_finetune.json`
+  Direct VoiceBox bootstrap training from CustomVoice + Base speaker encoder
+- `voicebox_retrain.json`
+  Continue training an existing VoiceBox checkpoint
+- `hybrid_clone_instruct_preset.json`
+  Preset-driven hybrid clone+instruct inference with speaker anchors
+- `voicebox_instruct_inference.json`
+  Basic `speaker + instruct` VoiceBox inference
+- `voicebox_clone.json`
+  Dedicated VoiceBox clone node example
+- `voicebox_clone_instruct.json`
+  Dedicated VoiceBox clone+instruct node example
+- `voicebox_clone_experiment.json`
+  Low-level VoiceBox clone / clone+instruct strategy playground
+- `voicebox_morph_and_infer.json`
+  Morph a new persistent speaker into a VoiceBox checkpoint, then infer
+- `voicebox_morph_from_prompt_and_infer.json`
+  Morph a persistent speaker from a generated prompt, then infer
+- `sft_base_12hz.json`
+  Upstream-style Base SFT training node example
+- `sft_custom_voice_12hz.json`
+  Upstream-style CustomVoice SFT training node example
+- `sft_voicebox_12hz.json`
+  Upstream-style VoiceBox SFT training node example
+- `sft_voicebox_bootstrap_12hz.json`
+  Upstream-style VoiceBox bootstrap SFT training node example
+- `upload_voicebox_to_hub.json`
+  Hugging Face Hub upload node example
 
 ## CLI Scripts
 

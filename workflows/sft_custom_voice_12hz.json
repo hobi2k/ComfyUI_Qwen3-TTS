@@ -1,0 +1,18 @@
+{
+  "1": {
+    "_meta": {
+      "title": "SFT CustomVoice 12Hz"
+    },
+    "class_type": "Qwen3SFTCustomVoice12Hz",
+    "inputs": {
+      "train_jsonl": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/train/prepared_train.jsonl",
+      "init_customvoice_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_customvoice17b_full/final",
+      "output_dir": "output/sft_custom_voice_12hz",
+      "speaker_name": "mai",
+      "speaker_encoder_model_path": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/models/Qwen3-TTS-12Hz-1.7B-Base",
+      "batch_size": 1,
+      "lr": 2e-05,
+      "num_epochs": 1
+    }
+  }
+}

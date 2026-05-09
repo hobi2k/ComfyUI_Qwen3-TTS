@@ -1,0 +1,14 @@
+{
+  "1": {
+    "_meta": {
+      "title": "Upload VoiceBox To Hub"
+    },
+    "class_type": "Qwen3UploadVoiceBoxToHub",
+    "inputs": {
+      "checkpoint": "/home/hosung/pytorch-demo/Qwen3-TTS-Demo/data/finetune-runs/mai_ko_voicebox17b_full/final",
+      "repo_id": "your-hf-user/your-voicebox-checkpoint",
+      "private": true,
+      "message": "Upload VoiceBox checkpoint"
+    }
+  }
+}
